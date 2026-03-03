@@ -1,0 +1,4 @@
+slack-bolt>=1.18.0
+slack-sdk>=3.27.0
+aristotlelib>=0.1.0
+aiohttp>=3.9.0
