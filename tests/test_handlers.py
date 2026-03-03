@@ -133,6 +133,32 @@ class TestHandleLeanFileUpload:
         assert say.call_count >= 2
 
     @pytest.mark.asyncio
+    async def test_formal_mode_disables_auto_add_imports(self, slack_event, say, client):
+        """Verify auto_add_imports=False is passed for formal mode (prevents assertion in aristotlelib)."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_FILE_UPLOAD,
+            payload={"name": "Foo.lean", "url_private_download": "https://slack.com/files/x"},
+        )
+
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("src.aristotlebot.handlers.download_slack_file", mock_download),
+            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- solved"),
+            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        call_kwargs = mock_prove.call_args.kwargs
+        assert call_kwargs["auto_add_imports"] is False, \
+            "formal mode must pass auto_add_imports=False when validate_lean_project=False"
+        assert call_kwargs["validate_lean_project"] is False
+
+    @pytest.mark.asyncio
     async def test_missing_download_url_posts_error(self, slack_event, say, client):
         classified = ClassifiedMessage(
             kind=MessageKind.LEAN_FILE_UPLOAD,
@@ -177,6 +203,30 @@ class TestHandleLeanUrl:
 
         mock_download.assert_called_once()
         mock_prove.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_url_formal_mode_disables_auto_add_imports(self, slack_event, say, client):
+        """Verify auto_add_imports=False is passed for URL formal mode too."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://example.com/Foo.lean",
+        )
+
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("src.aristotlebot.handlers.download_url", mock_download),
+            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- proved"),
+            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("src.aristotlebot.handlers.shutil.rmtree"),
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        call_kwargs = mock_prove.call_args.kwargs
+        assert call_kwargs["auto_add_imports"] is False
+        assert call_kwargs["validate_lean_project"] is False
 
     @pytest.mark.asyncio
     async def test_download_failure_posts_error(self, slack_event, say, client):

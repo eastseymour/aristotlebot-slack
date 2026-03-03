@@ -214,6 +214,7 @@ async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> str:
         result_path_str = await Project.prove_from_file(
             input_file_path=input_path,
             validate_lean_project=False,
+            auto_add_imports=False,
             wait_for_completion=True,
             output_file_path=output_path,
             project_input_type=ProjectInputType.FORMAL_LEAN,

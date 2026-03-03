@@ -51,9 +51,12 @@ Slack event → app.py (classify) → handlers.py (dispatch) → aristotlelib �
 
 ```python
 # Formal mode (for .lean files)
+# IMPORTANT: auto_add_imports=False is required when validate_lean_project=False,
+# otherwise aristotlelib asserts that validate_lean_project must be True.
 result_path = await Project.prove_from_file(
     input_file_path=path_to_lean,
     validate_lean_project=False,
+    auto_add_imports=False,
     wait_for_completion=True,
     output_file_path=output_path,
     project_input_type=ProjectInputType.FORMAL_LEAN,
