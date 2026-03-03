@@ -10,7 +10,11 @@ python3 -m pytest tests/ -v
 python3 -m pytest tests/test_utils.py -v
 
 # Run the bot (requires env vars)
-python3 main.py
+python3 -m aristotlebot              # preferred (module entry point)
+python3 main.py                      # also works
+
+# Install the package (required for module imports)
+pip install -e .
 
 # Install dependencies
 pip install -r requirements.txt          # production
@@ -89,6 +93,7 @@ result_path = await Project.prove_from_file(
 ```
 src/aristotlebot/
 ├── __init__.py        # Package version
+├── __main__.py        # python -m aristotlebot entry point
 ├── app.py             # Bolt app factory, event listeners
 ├── handlers.py        # Three input mode handlers
 └── utils.py           # Classification, download, formatting helpers
@@ -105,3 +110,5 @@ tests/
 - `create_app()` accepts `token_verification_enabled=False` for testing (skips `auth.test` API call)
 - Integration test stubs exist in `test_handlers.py` — they require live credentials and are skipped by default
 - All async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
+- Test imports use the canonical `aristotlebot` package path (not `src.aristotlebot`)
+- Package must be installed (`pip install -e .`) for tests and module invocation to work

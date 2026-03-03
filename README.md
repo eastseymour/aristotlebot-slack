@@ -52,13 +52,17 @@ cd aristotlebot-slack
 # Install dependencies
 pip install -r requirements.txt
 
+# Install the package (required for module imports)
+pip install -e .
+
 # Set environment variables
 export SLACK_BOT_TOKEN="xoxb-..."
 export SLACK_APP_TOKEN="xapp-..."
 export ARISTOTLE_API_KEY="..."
 
 # Run the bot
-python main.py
+python -m aristotlebot          # preferred
+python main.py                  # also works
 ```
 
 ### Docker
@@ -106,9 +110,10 @@ python3 -m pytest tests/ -v
 
 ```
 aristotlebot-slack/
-├── main.py                    # Entry point
+├── main.py                    # Entry point (legacy)
 ├── src/aristotlebot/
 │   ├── __init__.py
+│   ├── __main__.py            # python -m aristotlebot entry point
 │   ├── app.py                 # Slack Bolt app factory + Socket Mode startup
 │   ├── handlers.py            # Message handlers for the three input modes
 │   └── utils.py               # File download, message classification, formatting

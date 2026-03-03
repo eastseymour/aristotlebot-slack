@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.aristotlebot.utils import (
+from aristotlebot.utils import (
     ClassifiedMessage,
     MessageKind,
     classify_message,
@@ -196,7 +196,7 @@ class TestDownloadSlackFile:
         mock_session.get = MagicMock(return_value=_async_context_manager(mock_resp))
         mock_session_cls = MagicMock(return_value=_async_context_manager(mock_session))
 
-        with patch("src.aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
+        with patch("aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
             result = await download_slack_file(
                 url="https://files.slack.com/download/test.lean",
                 token="xoxb-test-token",
@@ -223,7 +223,7 @@ class TestDownloadUrl:
         mock_session.get = MagicMock(return_value=_async_context_manager(mock_resp))
         mock_session_cls = MagicMock(return_value=_async_context_manager(mock_session))
 
-        with patch("src.aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
+        with patch("aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
             result = await download_url(
                 url="https://example.com/Foo.lean",
                 dest_dir=tmp_path,
@@ -242,7 +242,7 @@ class TestDownloadUrl:
         mock_session.get = MagicMock(return_value=_async_context_manager(mock_resp))
         mock_session_cls = MagicMock(return_value=_async_context_manager(mock_session))
 
-        with patch("src.aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
+        with patch("aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
             result = await download_url(
                 url="https://example.com/path?token=abc",
                 dest_dir=tmp_path,
