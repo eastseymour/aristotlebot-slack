@@ -7,6 +7,8 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
 - **`.lean` file uploads** — Upload a `.lean` file to the bot. It downloads the file, submits it to Aristotle in formal mode, and posts the proof back in-thread.
 - **URLs to `.lean` files** — Paste a URL ending in `.lean` (e.g., from GitHub). The bot downloads and processes it the same as an upload.
 - **Natural language** — Send any other message and the bot submits it to Aristotle in informal mode (e.g., "Prove that 1 + 1 = 2").
+- **Health check endpoint** — HTTP health check on port 8080 reporting Socket Mode connection status, event counts, and registered listeners.
+- **Diagnostic logging** — Verbose logging of all incoming events with raw payloads at DEBUG level for troubleshooting.
 
 ## Setup
 
@@ -18,29 +20,49 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
 
 ### Slack App Configuration
 
-1. Create a new Slack app at https://api.slack.com/apps
-2. Enable **Socket Mode** and generate an **App-Level Token** (`xapp-…`) with `connections:write` scope
-3. Under **OAuth & Permissions**, add these Bot Token Scopes:
-   - `chat:write`
-   - `files:read`
-   - `reactions:write`
-   - `app_mentions:read`
-   - `im:history` (for DMs)
-   - `channels:history` (for channel messages)
-4. Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-…`)
-5. Enable **Event Subscriptions** and subscribe to:
-   - `message.im`
-   - `message.channels`
-   - `app_mention`
+> **This is the most common cause of "zero events received".** If the bot connects to Socket Mode successfully but never receives any events, verify every step below.
+
+1. **Create a new Slack app** at https://api.slack.com/apps
+2. **Enable Socket Mode**:
+   - Go to **Socket Mode** in the sidebar and toggle it ON
+   - Generate an **App-Level Token** (`xapp-...`) with the `connections:write` scope
+3. **Enable Event Subscriptions**:
+   - Go to **Event Subscriptions** in the sidebar and toggle it ON
+   - Under **Subscribe to bot events**, add:
+     - `app_mention` — fires when someone @-mentions the bot
+     - `message.channels` — fires for messages in public channels the bot is in
+     - `message.im` — fires for direct messages to the bot
+   - **Save Changes** (this is easy to forget!)
+4. **Set Bot Token Scopes** (under **OAuth & Permissions**):
+   - `app_mentions:read` — required for `app_mention` events
+   - `chat:write` — required to post messages
+   - `channels:read` — required to see channel info
+   - `channels:history` — required for `message.channels` events
+   - `im:history` — required for `message.im` events
+   - `files:read` — required to download uploaded files
+   - `reactions:write` — required to add/remove emoji reactions
+5. **Install the app** to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
+6. **Invite the bot to channels**: The bot must be a member of any channel where it should receive events. Use `/invite @aristotlebot` in each channel.
+
+### Troubleshooting: Bot Receives Zero Events
+
+If the bot connects via Socket Mode but receives no events:
+
+1. **Check Event Subscriptions**: Go to https://api.slack.com/apps → your app → Event Subscriptions. Ensure it's toggled ON and the bot events (`app_mention`, `message.channels`, `message.im`) are listed.
+2. **Check the health endpoint**: `curl http://localhost:8080/health` — look at `events.total_received` and `registered_listeners`.
+3. **Enable DEBUG logging**: Set `LOG_LEVEL=DEBUG` to see raw event payloads. Lines prefixed with `[DIAG]` show exactly what events arrive.
+4. **Invite the bot to the channel**: The bot must be a member of channels to receive `message.channels` events.
+5. **Reinstall the app**: After changing scopes or event subscriptions, you may need to reinstall the app to your workspace.
 
 ### Environment Variables
 
-| Variable           | Description                                 | Required |
-| ------------------ | ------------------------------------------- | -------- |
-| `SLACK_BOT_TOKEN`  | Bot User OAuth Token (`xoxb-…`)             | Yes      |
-| `SLACK_APP_TOKEN`  | App-Level Token (`xapp-…`) for Socket Mode  | Yes      |
-| `ARISTOTLE_API_KEY`| API key for aristotlelib                    | Yes      |
-| `LOG_LEVEL`        | Logging level (default: `INFO`)             | No       |
+| Variable             | Description                                 | Required |
+| -------------------- | ------------------------------------------- | -------- |
+| `SLACK_BOT_TOKEN`    | Bot User OAuth Token (`xoxb-...`)           | Yes      |
+| `SLACK_APP_TOKEN`    | App-Level Token (`xapp-...`) for Socket Mode| Yes      |
+| `ARISTOTLE_API_KEY`  | API key for aristotlelib                    | Yes      |
+| `LOG_LEVEL`          | Logging level (default: `INFO`)             | No       |
+| `HEALTH_CHECK_PORT`  | Health server port (default: `8080`)        | No       |
 
 ### Install & Run
 
@@ -52,13 +74,17 @@ cd aristotlebot-slack
 # Install dependencies
 pip install -r requirements.txt
 
+# Install the package (required for module imports)
+pip install -e .
+
 # Set environment variables
 export SLACK_BOT_TOKEN="xoxb-..."
 export SLACK_APP_TOKEN="xapp-..."
 export ARISTOTLE_API_KEY="..."
 
 # Run the bot
-python main.py
+python -m aristotlebot          # preferred
+python main.py                  # also works
 ```
 
 ### Docker
@@ -89,9 +115,38 @@ Mention the bot in a channel:
 ### Response Format
 
 The bot responds in-thread with:
-- ⏳ A hourglass reaction while processing
-- 📝 A progress message
-- ✅ The completed proof in a Lean code block, or ❌ an error message
+- An hourglass reaction while processing
+- A progress message
+- The completed proof in a Lean code block, or an error message
+
+### Health Check
+
+The bot exposes an HTTP health endpoint (default: port 8080):
+
+```bash
+curl http://localhost:8080/health
+```
+
+Example response:
+
+```json
+{
+  "status": "ok",
+  "uptime_seconds": 3600.5,
+  "socket_mode_connected": true,
+  "events": {
+    "total_received": 42,
+    "message_events": 30,
+    "app_mention_events": 10,
+    "ignored_events": 2
+  },
+  "last_event": {
+    "timestamp_iso": "2026-03-04T12:00:00Z",
+    "seconds_ago": 5.2
+  },
+  "registered_listeners": ["message", "app_mention"]
+}
+```
 
 ## Development
 
@@ -99,6 +154,7 @@ The bot responds in-thread with:
 
 ```bash
 pip install -r requirements-dev.txt
+pip install -e .
 python3 -m pytest tests/ -v
 ```
 
@@ -106,15 +162,18 @@ python3 -m pytest tests/ -v
 
 ```
 aristotlebot-slack/
-├── main.py                    # Entry point
+├── main.py                    # Entry point (legacy)
 ├── src/aristotlebot/
 │   ├── __init__.py
-│   ├── app.py                 # Slack Bolt app factory + Socket Mode startup
+│   ├── __main__.py            # python -m aristotlebot entry point
+│   ├── app.py                 # Slack Bolt app factory + Socket Mode startup + telemetry
 │   ├── handlers.py            # Message handlers for the three input modes
+│   ├── health.py              # HTTP health-check server (port 8080)
 │   └── utils.py               # File download, message classification, formatting
 ├── tests/
-│   ├── test_app.py            # App creation and env validation tests
+│   ├── test_app.py            # App creation, env validation, telemetry tests
 │   ├── test_handlers.py       # Handler tests (mocked aristotlelib + Slack)
+│   ├── test_health.py         # Health endpoint tests
 │   └── test_utils.py          # Utils tests (classification, formatting, download)
 ├── pyproject.toml
 ├── requirements.txt

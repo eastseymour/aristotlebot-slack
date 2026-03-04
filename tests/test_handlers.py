@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.aristotlebot.handlers import handle_message
-from src.aristotlebot.utils import ClassifiedMessage, MessageKind
+from aristotlebot.handlers import handle_message
+from aristotlebot.utils import ClassifiedMessage, MessageKind
 
 
 # ===================================================================
@@ -56,8 +56,8 @@ class TestHandleNaturalLanguage:
 
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
         with (
-            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("src.aristotlebot.handlers.read_solution_file", return_value="theorem : 1+1=2 := rfl"),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="theorem : 1+1=2 := rfl"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -90,7 +90,7 @@ class TestHandleNaturalLanguage:
         )
 
         mock_prove = AsyncMock(side_effect=RuntimeError("API error"))
-        with patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove):
+        with patch("aristotlebot.handlers.Project.prove_from_file", mock_prove):
             await handle_message(slack_event, say, client, classified)
 
         # Should have posted an error message
@@ -118,11 +118,11 @@ class TestHandleLeanFileUpload:
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
 
         with (
-            patch("src.aristotlebot.handlers.download_slack_file", mock_download),
-            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- solved"),
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.download_slack_file", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
         ):
             await handle_message(slack_event, say, client, classified)
@@ -144,11 +144,11 @@ class TestHandleLeanFileUpload:
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
 
         with (
-            patch("src.aristotlebot.handlers.download_slack_file", mock_download),
-            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- solved"),
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.download_slack_file", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
         ):
             await handle_message(slack_event, say, client, classified)
@@ -166,8 +166,8 @@ class TestHandleLeanFileUpload:
         )
 
         with (
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
         ):
             await handle_message(slack_event, say, client, classified)
@@ -193,11 +193,11 @@ class TestHandleLeanUrl:
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
 
         with (
-            patch("src.aristotlebot.handlers.download_url", mock_download),
-            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- proved"),
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- proved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -216,11 +216,11 @@ class TestHandleLeanUrl:
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
 
         with (
-            patch("src.aristotlebot.handlers.download_url", mock_download),
-            patch("src.aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("src.aristotlebot.handlers.read_solution_file", return_value="-- proved"),
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- proved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -238,9 +238,9 @@ class TestHandleLeanUrl:
         mock_download = AsyncMock(side_effect=Exception("404 Not Found"))
 
         with (
-            patch("src.aristotlebot.handlers.download_url", mock_download),
-            patch("src.aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
-            patch("src.aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
         ):
             await handle_message(slack_event, say, client, classified)
 
