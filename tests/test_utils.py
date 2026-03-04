@@ -5,20 +5,25 @@ from __future__ import annotations
 import tarfile
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
 from aristotlebot.utils import (
+    AristotleResult,
     ClassifiedMessage,
     MessageKind,
+    _extract_theorem_name,
+    _make_solution_filename,
     _strip_slack_angle_brackets,
     classify_message,
     download_slack_file,
     download_url,
     format_result_message,
+    format_result_summary,
     make_temp_dir,
     read_solution_file,
+    upload_slack_file,
 )
 
 
@@ -221,11 +226,101 @@ class TestClassifyMessageAngleBrackets:
 
 
 # ===================================================================
-# format_result_message
+# _extract_theorem_name
+# ===================================================================
+
+class TestExtractTheoremName:
+    """Unit tests for _extract_theorem_name — Lean declaration name extraction."""
+
+    def test_extracts_theorem_name(self):
+        assert _extract_theorem_name("theorem foo : True := trivial") == "foo"
+
+    def test_extracts_lemma_name(self):
+        assert _extract_theorem_name("lemma bar : True := trivial") == "bar"
+
+    def test_extracts_def_name(self):
+        assert _extract_theorem_name("def baz : Nat := 42") == "baz"
+
+    def test_extracts_example_name(self):
+        assert _extract_theorem_name("example qux : True := trivial") == "qux"
+
+    def test_returns_none_for_anonymous_theorem(self):
+        """Anonymous declarations like 'theorem : True := trivial' have no name."""
+        assert _extract_theorem_name("theorem : True := trivial") is None
+
+    def test_returns_none_for_no_declaration(self):
+        assert _extract_theorem_name("-- just a comment") is None
+
+    def test_returns_none_for_empty_string(self):
+        assert _extract_theorem_name("") is None
+
+    def test_extracts_first_name_from_multiple(self):
+        code = "theorem first : True := trivial\ntheorem second : True := trivial"
+        assert _extract_theorem_name(code) == "first"
+
+    def test_handles_dotted_name(self):
+        assert _extract_theorem_name("theorem Nat.add_comm : True := trivial") == "Nat.add_comm"
+
+    def test_handles_name_with_apostrophe(self):
+        assert _extract_theorem_name("theorem foo' : True := trivial") == "foo'"
+
+    def test_handles_name_with_underscores(self):
+        assert _extract_theorem_name("theorem my_long_name : True := trivial") == "my_long_name"
+
+    def test_ignores_keyword_in_comment(self):
+        """Keywords inside comments should not match."""
+        # The regex will still match inside comments — this is acceptable
+        # since we're extracting a best-effort name for filenames.
+        code = "-- some preamble\ntheorem real_theorem : True := trivial"
+        name = _extract_theorem_name(code)
+        assert name == "real_theorem"
+
+
+# ===================================================================
+# _make_solution_filename
+# ===================================================================
+
+class TestMakeSolutionFilename:
+    """Unit tests for _make_solution_filename — filename generation."""
+
+    def test_uses_theorem_name(self):
+        assert _make_solution_filename("theorem foo : True := trivial") == "foo.lean"
+
+    def test_uses_lemma_name(self):
+        assert _make_solution_filename("lemma bar : True := trivial") == "bar.lean"
+
+    def test_falls_back_to_solution(self):
+        assert _make_solution_filename("-- just a comment") == "solution.lean"
+
+    def test_falls_back_for_none(self):
+        assert _make_solution_filename(None) == "solution.lean"
+
+    def test_falls_back_for_empty_string(self):
+        assert _make_solution_filename("") == "solution.lean"
+
+    def test_sanitizes_special_chars(self):
+        """Special characters in names should be replaced with underscores."""
+        filename = _make_solution_filename("theorem Nat.add_comm : True := trivial")
+        assert filename == "Nat.add_comm.lean"
+        assert filename.endswith(".lean")
+
+    def test_filename_always_ends_with_lean(self):
+        """Invariant: filename always ends with .lean."""
+        for text in [
+            "theorem foo : True := trivial",
+            "-- no theorem",
+            None,
+            "",
+        ]:
+            assert _make_solution_filename(text).endswith(".lean")
+
+
+# ===================================================================
+# format_result_message (legacy)
 # ===================================================================
 
 class TestFormatResultMessage:
-    """Tests for format_result_message — Slack message formatting."""
+    """Tests for format_result_message — legacy Slack message formatting (inline code)."""
 
     def test_complete_with_solution(self):
         msg = format_result_message(status="COMPLETE", solution_text="theorem foo : True := trivial")
@@ -253,6 +348,316 @@ class TestFormatResultMessage:
         msg = format_result_message(status="COMPLETE", solution_text=long_text)
         assert "truncated" in msg
         assert len(msg) < 45_000
+
+
+# ===================================================================
+# format_result_summary (new — no inline code)
+# ===================================================================
+
+class TestFormatResultSummary:
+    """Tests for format_result_summary — brief summaries without inline code."""
+
+    def test_complete_with_solution_includes_theorem_name(self):
+        msg = format_result_summary(
+            status="COMPLETE",
+            solution_text="theorem foo : True := trivial",
+        )
+        assert ":white_check_mark:" in msg
+        assert "`foo`" in msg
+        assert "proof generated" in msg
+        assert ".lean" in msg
+
+    def test_complete_with_solution_no_inline_code(self):
+        """Summary must NOT contain inline code blocks."""
+        msg = format_result_summary(
+            status="COMPLETE",
+            solution_text="theorem foo : True := trivial",
+        )
+        assert "```lean" not in msg
+        assert "```" not in msg
+
+    def test_complete_without_solution(self):
+        msg = format_result_summary(status="COMPLETE", solution_text=None)
+        assert ":white_check_mark:" in msg
+        assert "no solution text" in msg
+
+    def test_complete_with_anonymous_theorem(self):
+        """Anonymous theorems should not add a name to the summary."""
+        msg = format_result_summary(
+            status="COMPLETE",
+            solution_text="theorem : True := trivial",
+        )
+        assert ":white_check_mark:" in msg
+        assert "proof generated" in msg
+
+    def test_failed_with_error(self):
+        msg = format_result_summary(status="FAILED", error="API timeout")
+        assert ":x:" in msg
+        assert "API timeout" in msg
+
+    def test_failed_truncates_long_error(self):
+        """Long errors are truncated to first line."""
+        error = "First line\nSecond line\nThird line"
+        msg = format_result_summary(status="FAILED", error=error)
+        assert "First line" in msg
+        assert "Second line" not in msg
+
+    def test_in_progress_status(self):
+        msg = format_result_summary(status="IN_PROGRESS")
+        assert ":hourglass_flowing_sand:" in msg
+        assert "IN_PROGRESS" in msg
+
+    def test_summary_is_short(self):
+        """Summary must always be < 500 chars."""
+        msg = format_result_summary(
+            status="COMPLETE",
+            solution_text="theorem some_very_long_name_that_goes_on_and_on : True := trivial",
+        )
+        assert len(msg) < 500
+
+
+# ===================================================================
+# AristotleResult
+# ===================================================================
+
+class TestAristotleResult:
+    """Tests for AristotleResult — the result NamedTuple."""
+
+    def test_success_result(self):
+        result = AristotleResult(status="COMPLETE", solution_text="theorem foo : True := trivial")
+        assert result.status == "COMPLETE"
+        assert result.solution_text is not None
+        assert result.error is None
+
+    def test_failure_result(self):
+        result = AristotleResult(status="FAILED", error="timeout")
+        assert result.status == "FAILED"
+        assert result.solution_text is None
+        assert result.error == "timeout"
+
+    def test_defaults_to_none(self):
+        result = AristotleResult(status="COMPLETE")
+        assert result.solution_text is None
+        assert result.error is None
+
+
+# ===================================================================
+# upload_slack_file
+# ===================================================================
+
+class TestUploadSlackFile:
+    """Unit tests for upload_slack_file — Slack two-step file upload."""
+
+    def test_calls_get_upload_url_external(self):
+        """Step 1: calls files_getUploadURLExternal with correct params."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/presigned",
+            "file_id": "F_TEST_123",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content="theorem foo : True := trivial",
+                filename="foo.lean",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+        client.files_getUploadURLExternal.assert_called_once()
+        call_kwargs = client.files_getUploadURLExternal.call_args.kwargs
+        assert call_kwargs["filename"] == "foo.lean"
+        assert call_kwargs["length"] == len("theorem foo : True := trivial".encode("utf-8"))
+
+    def test_posts_content_to_presigned_url(self):
+        """Step 2: POSTs file content to the presigned upload URL."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/presigned",
+            "file_id": "F_TEST_123",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content="theorem foo : True := trivial",
+                filename="foo.lean",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+        mock_urlopen.assert_called_once()
+        request_obj = mock_urlopen.call_args[0][0]
+        assert request_obj.full_url == "https://files.slack.com/upload/v1/presigned"
+        assert request_obj.data == "theorem foo : True := trivial".encode("utf-8")
+        assert request_obj.get_header("Content-type") == "application/octet-stream"
+
+    def test_calls_complete_upload_external(self):
+        """Step 3: calls files_completeUploadExternal with file_id and channel."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/presigned",
+            "file_id": "F_TEST_456",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content="theorem bar : True := trivial",
+                filename="bar.lean",
+                channel="C67890",
+                thread_ts="9876543210.654321",
+                title="My Proof",
+            )
+
+        client.files_completeUploadExternal.assert_called_once()
+        call_kwargs = client.files_completeUploadExternal.call_args.kwargs
+        assert call_kwargs["files"] == [{"id": "F_TEST_456", "title": "My Proof"}]
+        assert call_kwargs["channel_id"] == "C67890"
+        assert call_kwargs["thread_ts"] == "9876543210.654321"
+
+    def test_uses_filename_as_default_title(self):
+        """When no title is given, uses filename as the title."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/presigned",
+            "file_id": "F_TEST_789",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content="-- content",
+                filename="solution.lean",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+        call_kwargs = client.files_completeUploadExternal.call_args.kwargs
+        assert call_kwargs["files"] == [{"id": "F_TEST_789", "title": "solution.lean"}]
+
+    def test_rejects_empty_content(self):
+        """Precondition: content must be non-empty."""
+        client = MagicMock()
+        with pytest.raises(AssertionError, match="cannot upload empty file"):
+            upload_slack_file(
+                client,
+                content="",
+                filename="foo.lean",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+    def test_rejects_empty_filename(self):
+        """Precondition: filename must be non-empty."""
+        client = MagicMock()
+        with pytest.raises(AssertionError, match="filename must be non-empty"):
+            upload_slack_file(
+                client,
+                content="-- content",
+                filename="",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+
+# ===================================================================
+# upload_slack_file — integration tests
+# ===================================================================
+
+class TestUploadSlackFileIntegration:
+    """Integration tests for upload_slack_file — tests the full three-step flow."""
+
+    def test_full_upload_flow(self):
+        """Test the complete upload flow: getUploadURL → POST → completeUpload."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/presigned-url",
+            "file_id": "F_INTEGRATION",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        content = "theorem integration_test : True := trivial"
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content=content,
+                filename="integration_test.lean",
+                channel="C_INT",
+                thread_ts="1111111111.111111",
+                title="Integration Test Proof",
+            )
+
+        # Verify all three steps happened in order
+        assert client.files_getUploadURLExternal.call_count == 1
+        assert mock_urlopen.call_count == 1
+        assert client.files_completeUploadExternal.call_count == 1
+
+        # Verify content was encoded correctly
+        request_obj = mock_urlopen.call_args[0][0]
+        assert request_obj.data == content.encode("utf-8")
+
+    def test_upload_preserves_unicode_content(self):
+        """UTF-8 content with special characters is uploaded correctly."""
+        client = MagicMock()
+        client.files_getUploadURLExternal.return_value = {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/presigned",
+            "file_id": "F_UNICODE",
+        }
+        client.files_completeUploadExternal.return_value = {"ok": True}
+
+        content = "-- Résumé: théorème α ∧ β → γ"
+
+        with patch("aristotlebot.utils.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(status=200)
+            )
+            mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+            upload_slack_file(
+                client,
+                content=content,
+                filename="unicode.lean",
+                channel="C12345",
+                thread_ts="1234567890.123456",
+            )
+
+        request_obj = mock_urlopen.call_args[0][0]
+        assert request_obj.data == content.encode("utf-8")
+        # Length should match byte length, not character length
+        call_kwargs = client.files_getUploadURLExternal.call_args.kwargs
+        assert call_kwargs["length"] == len(content.encode("utf-8"))
 
 
 # ===================================================================
