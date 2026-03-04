@@ -5,12 +5,13 @@ Each handler follows the same contract:
     2. Download/prepare input.
     3. Submit to Aristotle via aristotlelib.
     4. Wait for completion.
-    5. Post the result back in-thread.
+    5. Post the result summary in-thread and upload the solution as a .lean file.
     6. Clean up temporary files.
 
 Invariants:
     - Temporary directories are always cleaned up, even on failure.
     - Every user-facing error is posted back in the thread (never silently swallowed).
+    - Solution code is uploaded as .lean file attachments, never posted inline.
 
 Note:
     Slack Bolt's ``say`` and ``client`` are synchronous even when called from
@@ -28,13 +29,16 @@ from pathlib import Path
 from aristotlelib.project import Project, ProjectInputType, ProjectStatus
 
 from .utils import (
+    AristotleResult,
     ClassifiedMessage,
     MessageKind,
+    _make_solution_filename,
     download_slack_file,
     download_url,
-    format_result_message,
+    format_result_summary,
     make_temp_dir,
     read_solution_file,
+    upload_slack_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,56 @@ async def handle_message(event: dict, say, client, classified: ClassifiedMessage
 
     handler = dispatch[classified.kind]
     await handler(event, say, client, classified)
+
+
+# ---------------------------------------------------------------------------
+# Result posting helper
+# ---------------------------------------------------------------------------
+
+def _post_result(
+    say,
+    client,
+    *,
+    channel: str,
+    thread_ts: str,
+    result: AristotleResult,
+) -> None:
+    """Post an Aristotle result: summary message + .lean file attachment.
+
+    For successful completions with solution text:
+        - Posts a brief summary message (no inline code).
+        - Uploads the solution as a .lean file attachment in the same thread.
+
+    For errors or empty results:
+        - Posts only the summary message (no file upload).
+
+    Preconditions:
+        - *result* is a valid AristotleResult.
+        - *say* and *client* are synchronous Slack bolt helpers.
+    """
+    summary = format_result_summary(
+        status=result.status,
+        solution_text=result.solution_text,
+        error=result.error,
+    )
+
+    # Upload solution as .lean file if we have solution text
+    if result.status == "COMPLETE" and result.solution_text:
+        filename = _make_solution_filename(result.solution_text)
+        try:
+            upload_slack_file(
+                client,
+                content=result.solution_text,
+                filename=filename,
+                channel=channel,
+                thread_ts=thread_ts,
+                title=filename,
+            )
+        except Exception:
+            logger.exception("Failed to upload solution file; falling back to summary only")
+            summary += "\n_(File upload failed; solution not attached.)_"
+
+    say(text=summary, thread_ts=thread_ts)
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +156,8 @@ async def _handle_lean_file_upload(
             filename=filename,
         )
 
-        result_text = await _run_aristotle_formal(input_path, tmp_dir)
-        say(text=result_text, thread_ts=thread_ts)
+        result = await _run_aristotle_formal(input_path, tmp_dir)
+        _post_result(say, client, channel=channel, thread_ts=thread_ts, result=result)
 
     except Exception:
         logger.exception("Error handling .lean file upload")
@@ -143,8 +197,8 @@ async def _handle_lean_url(
 
         input_path = await download_url(url=url, dest_dir=tmp_dir)
 
-        result_text = await _run_aristotle_formal(input_path, tmp_dir)
-        say(text=result_text, thread_ts=thread_ts)
+        result = await _run_aristotle_formal(input_path, tmp_dir)
+        _post_result(say, client, channel=channel, thread_ts=thread_ts, result=result)
 
     except Exception:
         logger.exception("Error handling .lean URL")
@@ -185,8 +239,8 @@ async def _handle_natural_language(
             thread_ts=thread_ts,
         )
 
-        result_text = await _run_aristotle_informal(text, tmp_dir)
-        say(text=result_text, thread_ts=thread_ts)
+        result = await _run_aristotle_informal(text, tmp_dir)
+        _post_result(say, client, channel=channel, thread_ts=thread_ts, result=result)
 
     except Exception:
         logger.exception("Error handling natural language message")
@@ -203,11 +257,11 @@ async def _handle_natural_language(
 # Aristotle submission helpers
 # ---------------------------------------------------------------------------
 
-async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> str:
-    """Submit a .lean file to Aristotle (formal mode) and return a formatted result message.
+async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> AristotleResult:
+    """Submit a .lean file to Aristotle (formal mode) and return the result.
 
     Postconditions:
-        - Always returns a user-friendly string (never raises to the caller).
+        - Always returns an AristotleResult (never raises to the caller).
     """
     output_path = tmp_dir / "solution.lean"
     try:
@@ -221,17 +275,17 @@ async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> str:
         )
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
-        return format_result_message(status="COMPLETE", solution_text=solution_text)
+        return AristotleResult(status="COMPLETE", solution_text=solution_text)
     except Exception as exc:
         logger.exception("Aristotle formal submission failed")
-        return format_result_message(status="FAILED", error=str(exc))
+        return AristotleResult(status="FAILED", error=str(exc))
 
 
-async def _run_aristotle_informal(prompt: str, tmp_dir: Path) -> str:
-    """Submit a natural language prompt to Aristotle (informal mode) and return a formatted result.
+async def _run_aristotle_informal(prompt: str, tmp_dir: Path) -> AristotleResult:
+    """Submit a natural language prompt to Aristotle (informal mode) and return the result.
 
     Postconditions:
-        - Always returns a user-friendly string (never raises to the caller).
+        - Always returns an AristotleResult (never raises to the caller).
     """
     output_path = tmp_dir / "solution.lean"
     try:
@@ -243,10 +297,10 @@ async def _run_aristotle_informal(prompt: str, tmp_dir: Path) -> str:
         )
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
-        return format_result_message(status="COMPLETE", solution_text=solution_text)
+        return AristotleResult(status="COMPLETE", solution_text=solution_text)
     except Exception as exc:
         logger.exception("Aristotle informal submission failed")
-        return format_result_message(status="FAILED", error=str(exc))
+        return AristotleResult(status="FAILED", error=str(exc))
 
 
 # ---------------------------------------------------------------------------

@@ -4,18 +4,23 @@ Invariants:
 - Downloaded files are always written to a temporary directory that the caller manages.
 - All network helpers raise on non-200 responses (fail-fast).
 - Formatted messages never exceed Slack's 40 000-char limit.
+- Solution code is uploaded as .lean file attachments, never posted inline.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
+import urllib.request
 from enum import Enum, auto
 from pathlib import Path
 from typing import NamedTuple
 
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -171,10 +176,77 @@ def make_temp_dir(prefix: str = "aristotlebot_") -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Aristotle result type
+# ---------------------------------------------------------------------------
+
+class AristotleResult(NamedTuple):
+    """Result of an Aristotle submission.
+
+    Discriminated by *status*:
+        - ``"COMPLETE"`` with ``solution_text`` → successful proof.
+        - ``"COMPLETE"`` without ``solution_text`` → completed but no output.
+        - ``"FAILED"`` with ``error`` → submission failed.
+        - Other status values → in-progress or unknown.
+
+    Invariants:
+        - ``error`` is non-None only when the submission raised an exception.
+        - ``solution_text`` and ``error`` are never both non-None.
+    """
+    status: str
+    solution_text: str | None = None
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Result formatting
 # ---------------------------------------------------------------------------
 
 _SLACK_MAX_TEXT = 39_000  # leave headroom below the 40 000 hard limit
+
+# Regex to extract the first theorem/lemma/def name from Lean source.
+# Lean identifiers start with a letter or underscore, followed by alphanumeric/underscore/dot/'.
+# We exclude bare colons and other punctuation that appear in anonymous declarations.
+_LEAN_DECL_RE = re.compile(
+    r"(?:theorem|lemma|def|example)\s+([A-Za-z_][A-Za-z0-9_.']*)"
+)
+
+
+def _extract_theorem_name(solution_text: str) -> str | None:
+    """Extract the first theorem/lemma/def name from Lean code.
+
+    Returns None if no named declaration is found. Anonymous declarations
+    like ``theorem : True := trivial`` (no name before the colon) return None.
+
+    >>> _extract_theorem_name("theorem foo : True := trivial")
+    'foo'
+    >>> _extract_theorem_name("-- just a comment") is None
+    True
+    >>> _extract_theorem_name("theorem : True := trivial") is None
+    True
+    """
+    match = _LEAN_DECL_RE.search(solution_text)
+    return match.group(1) if match else None
+
+
+def _make_solution_filename(solution_text: str | None) -> str:
+    """Generate a descriptive filename for a solution .lean file.
+
+    Uses the theorem name if one can be extracted, otherwise falls back
+    to ``"solution.lean"``.
+
+    Postconditions:
+        - Returned filename always ends with ``.lean``.
+        - Filename contains only safe characters (alphanumeric, underscore, dot, hyphen).
+    """
+    if solution_text:
+        name = _extract_theorem_name(solution_text)
+        if name:
+            # Sanitize: keep only word chars, dots, hyphens
+            safe = re.sub(r"[^\w.\-]", "_", name)
+            filename = f"{safe}.lean"
+            assert filename.endswith(".lean")
+            return filename
+    return "solution.lean"
 
 
 def format_result_message(
@@ -183,7 +255,11 @@ def format_result_message(
     solution_text: str | None = None,
     error: str | None = None,
 ) -> str:
-    """Format an Aristotle result for posting back to Slack.
+    """Format an Aristotle result for posting back to Slack (legacy, inline code).
+
+    .. deprecated::
+        Use :func:`format_result_summary` for new code. This function embeds
+        the full solution inline, which is replaced by file uploads in LEA-24.
 
     Postconditions:
         - Returned string length ≤ _SLACK_MAX_TEXT.
@@ -202,6 +278,120 @@ def format_result_message(
 
     assert len(msg) <= _SLACK_MAX_TEXT + 1000, "message exceeds safe Slack limit"
     return msg
+
+
+def format_result_summary(
+    *,
+    status: str,
+    solution_text: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Format a brief summary of an Aristotle result for Slack (no inline code).
+
+    Unlike :func:`format_result_message`, this does NOT embed the full proof.
+    The solution code should be uploaded as a ``.lean`` file attachment via
+    :func:`upload_slack_file`.
+
+    Postconditions:
+        - Returned string is a short summary (< 500 chars).
+        - Keeps the ✅/❌ emoji prefix convention.
+    """
+    if error:
+        # Truncate error to first line for the summary
+        first_line = error.strip().split("\n", 1)[0]
+        if len(first_line) > 200:
+            first_line = first_line[:200] + "…"
+        msg = f":x: *Aristotle failed* — {first_line}"
+    elif status == "COMPLETE" and solution_text:
+        theorem_name = _extract_theorem_name(solution_text)
+        name_part = f" `{theorem_name}`" if theorem_name else ""
+        msg = (
+            f":white_check_mark: *Aristotle completed*{name_part}"
+            " — proof generated successfully. See attached `.lean` file."
+        )
+    elif status == "COMPLETE":
+        msg = ":white_check_mark: *Aristotle completed* (no solution text returned)"
+    else:
+        msg = f":hourglass_flowing_sand: *Status:* `{status}`"
+
+    assert len(msg) < 500, f"summary too long ({len(msg)} chars)"
+    return msg
+
+
+# ---------------------------------------------------------------------------
+# Slack file upload (two-step external upload API)
+# ---------------------------------------------------------------------------
+
+def upload_slack_file(
+    client,
+    *,
+    content: str,
+    filename: str,
+    channel: str,
+    thread_ts: str,
+    title: str | None = None,
+) -> None:
+    """Upload text content to Slack as a file attachment using the external upload API.
+
+    Uses the two-step Slack file upload flow:
+        1. ``files.getUploadURLExternal`` — obtain a presigned upload URL and file ID.
+        2. HTTP POST the file content to the presigned URL.
+        3. ``files.completeUploadExternal`` — finalize and share the file in the
+           specified channel and thread.
+
+    Preconditions:
+        - *client* is a synchronous Slack WebClient with ``files:write`` scope.
+        - *content* is non-empty UTF-8 text.
+        - *channel* and *thread_ts* identify a valid Slack thread.
+
+    Postconditions:
+        - The file appears as an attachment in the specified Slack thread.
+
+    Raises:
+        ``slack_sdk.errors.SlackApiError`` if any Slack API call fails.
+        ``urllib.error.URLError`` if the presigned URL upload fails.
+    """
+    assert content, "cannot upload empty file content"
+    assert filename, "filename must be non-empty"
+
+    content_bytes = content.encode("utf-8")
+
+    # Step 1: Get a presigned upload URL from Slack
+    upload_response = client.files_getUploadURLExternal(
+        filename=filename,
+        length=len(content_bytes),
+    )
+    upload_url = upload_response["upload_url"]
+    file_id = upload_response["file_id"]
+
+    logger.debug(
+        "Got upload URL for file_id=%s, filename=%s, length=%d",
+        file_id, filename, len(content_bytes),
+    )
+
+    # Step 2: POST the file content to the presigned URL
+    req = urllib.request.Request(
+        upload_url,
+        data=content_bytes,
+        method="POST",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200, (
+            f"Presigned URL upload failed with status {resp.status}"
+        )
+
+    # Step 3: Finalize and share the file in the channel/thread
+    client.files_completeUploadExternal(
+        files=[{"id": file_id, "title": title or filename}],
+        channel_id=channel,
+        thread_ts=thread_ts,
+    )
+
+    logger.info(
+        "Uploaded solution file %s (file_id=%s) to channel=%s thread=%s",
+        filename, file_id, channel, thread_ts,
+    )
 
 
 def read_solution_file(path: Path) -> str | None:

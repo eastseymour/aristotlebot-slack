@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from aristotlebot.handlers import handle_message
-from aristotlebot.utils import ClassifiedMessage, MessageKind
+from aristotlebot.handlers import handle_message, _post_result
+from aristotlebot.utils import AristotleResult, ClassifiedMessage, MessageKind
 
 
 # ===================================================================
@@ -35,10 +35,17 @@ def say():
 
 @pytest.fixture
 def client():
-    """Mock Slack client with reactions_add/remove."""
+    """Mock Slack client with reactions and file upload support."""
     c = MagicMock()
     c.reactions_add = MagicMock()
     c.reactions_remove = MagicMock()
+    # Set up file upload mocks
+    c.files_getUploadURLExternal = MagicMock(return_value={
+        "ok": True,
+        "upload_url": "https://files.slack.com/upload/v1/test-presigned-url",
+        "file_id": "F_TEST_123",
+    })
+    c.files_completeUploadExternal = MagicMock(return_value={"ok": True})
     return c
 
 
@@ -57,20 +64,28 @@ class TestHandleNaturalLanguage:
         mock_prove = AsyncMock(return_value="/tmp/solution.lean")
         with (
             patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
-            patch("aristotlebot.handlers.read_solution_file", return_value="theorem : 1+1=2 := rfl"),
+            patch("aristotlebot.handlers.read_solution_file", return_value="theorem foo : 1+1=2 := rfl"),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
         ):
             await handle_message(slack_event, say, client, classified)
 
-        # Should have posted at least a progress message and a result
+        # Should have posted at least a progress message and a summary
         assert say.call_count >= 2
-        # The final call should contain the solution
+        # The final call should contain a summary (not inline code)
         final_call = say.call_args_list[-1]
-        assert "1+1=2" in final_call.kwargs.get("text", final_call[1].get("text", ""))
+        final_text = final_call.kwargs.get("text", final_call[1].get("text", ""))
+        assert ":white_check_mark:" in final_text
+        assert "Aristotle completed" in final_text
+        # Solution should NOT be inline
+        assert "```lean" not in final_text
 
         # prove_from_file should have been called with informal mode
         mock_prove.assert_called_once()
         call_kwargs = mock_prove.call_args.kwargs
         assert call_kwargs["input_content"] == "Prove that 1+1=2"
+
+        # File upload should have been called
+        mock_upload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_empty_message_is_ignored(self, slack_event, say, client):
@@ -98,6 +113,30 @@ class TestHandleNaturalLanguage:
         error_msgs = [c for c in calls if ":x:" in c]
         assert len(error_msgs) >= 1
 
+    @pytest.mark.asyncio
+    async def test_natural_language_uploads_solution_file(self, slack_event, say, client):
+        """Verify that natural language results are uploaded as .lean file attachments."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.NATURAL_LANGUAGE,
+            payload="Prove that 1+1=2",
+        )
+
+        solution = "theorem one_plus_one : 1+1=2 := rfl"
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+        with (
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value=solution),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        mock_upload.assert_called_once()
+        upload_kwargs = mock_upload.call_args.kwargs
+        assert upload_kwargs["content"] == solution
+        assert upload_kwargs["filename"].endswith(".lean")
+        assert upload_kwargs["channel"] == "C12345"
+        assert upload_kwargs["thread_ts"] == "1234567890.123456"
+
 
 # ===================================================================
 # .lean file upload handler
@@ -123,14 +162,16 @@ class TestHandleLeanFileUpload:
             patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
         ):
             await handle_message(slack_event, say, client, classified)
 
         mock_download.assert_called_once()
         mock_prove.assert_called_once()
-        # Result should be posted
+        # Result should be posted as summary + file
         assert say.call_count >= 2
+        mock_upload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_formal_mode_disables_auto_add_imports(self, slack_event, say, client):
@@ -149,6 +190,7 @@ class TestHandleLeanFileUpload:
             patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
         ):
             await handle_message(slack_event, say, client, classified)
@@ -176,6 +218,35 @@ class TestHandleLeanFileUpload:
         calls = [c.kwargs.get("text", c[1].get("text", "")) for c in say.call_args_list]
         assert any("Could not get download URL" in c for c in calls)
 
+    @pytest.mark.asyncio
+    async def test_file_upload_handler_uploads_solution(self, slack_event, say, client):
+        """Verify .lean file upload results are uploaded as file attachments."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_FILE_UPLOAD,
+            payload={"name": "Foo.lean", "url_private_download": "https://slack.com/files/x"},
+        )
+
+        solution = "theorem bar : True := trivial"
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_slack_file", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value=solution),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+            patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        mock_upload.assert_called_once()
+        upload_kwargs = mock_upload.call_args.kwargs
+        assert upload_kwargs["content"] == solution
+        assert upload_kwargs["filename"] == "bar.lean"
+        assert upload_kwargs["channel"] == "C12345"
+
 
 # ===================================================================
 # URL handler
@@ -198,6 +269,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.read_solution_file", return_value="-- proved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -221,6 +293,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.read_solution_file", return_value="-- proved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -248,6 +321,127 @@ class TestHandleLeanUrl:
         error_msgs = [c for c in calls if ":x:" in c]
         assert len(error_msgs) >= 1
 
+    @pytest.mark.asyncio
+    async def test_url_handler_uploads_solution(self, slack_event, say, client):
+        """Verify URL results are uploaded as file attachments."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://example.com/Foo.lean",
+        )
+
+        solution = "lemma my_lemma : True := trivial"
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value=solution),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        mock_upload.assert_called_once()
+        upload_kwargs = mock_upload.call_args.kwargs
+        assert upload_kwargs["content"] == solution
+        assert upload_kwargs["filename"] == "my_lemma.lean"
+
+
+# ===================================================================
+# _post_result helper
+# ===================================================================
+
+class TestPostResult:
+    """Tests for _post_result — the result posting helper."""
+
+    def test_posts_summary_and_uploads_file_on_success(self, say, client):
+        """Success with solution → posts summary + uploads .lean file."""
+        result = AristotleResult(
+            status="COMPLETE",
+            solution_text="theorem foo : True := trivial",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file") as mock_upload:
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        # Summary posted
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert ":white_check_mark:" in text
+        assert "`foo`" in text
+        assert "```lean" not in text
+
+        # File uploaded
+        mock_upload.assert_called_once()
+        upload_kwargs = mock_upload.call_args.kwargs
+        assert upload_kwargs["content"] == "theorem foo : True := trivial"
+        assert upload_kwargs["filename"] == "foo.lean"
+
+    def test_posts_summary_only_on_error(self, say, client):
+        """Error result → posts summary, no file upload."""
+        result = AristotleResult(
+            status="FAILED",
+            error="API timeout",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file") as mock_upload:
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert ":x:" in text
+        assert "API timeout" in text
+        mock_upload.assert_not_called()
+
+    def test_posts_summary_only_when_no_solution(self, say, client):
+        """Complete without solution_text → posts summary, no file upload."""
+        result = AristotleResult(status="COMPLETE", solution_text=None)
+
+        with patch("aristotlebot.handlers.upload_slack_file") as mock_upload:
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "no solution text" in text
+        mock_upload.assert_not_called()
+
+    def test_falls_back_on_upload_failure(self, say, client):
+        """If file upload fails, still post summary with fallback note."""
+        result = AristotleResult(
+            status="COMPLETE",
+            solution_text="theorem bar : True := trivial",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file", side_effect=RuntimeError("upload failed")):
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert ":white_check_mark:" in text
+        assert "File upload failed" in text
+
 
 # ===================================================================
 # Integration test structure
@@ -263,12 +457,12 @@ class TestIntegrationStructure:
     @pytest.mark.skipif(True, reason="Requires live Slack credentials")
     @pytest.mark.asyncio
     async def test_full_natural_language_flow(self):
-        """End-to-end: send NL prompt → Aristotle → Slack thread reply."""
+        """End-to-end: send NL prompt → Aristotle → Slack thread reply + file attachment."""
         # This would be filled in for integration testing with real credentials
         pass
 
     @pytest.mark.skipif(True, reason="Requires live Slack credentials")
     @pytest.mark.asyncio
     async def test_full_file_upload_flow(self):
-        """End-to-end: upload .lean file → Aristotle → Slack thread reply."""
+        """End-to-end: upload .lean file → Aristotle → Slack thread reply + file attachment."""
         pass
