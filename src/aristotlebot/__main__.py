@@ -38,8 +38,15 @@ def main() -> None:
     _validate_env()
 
     from aristotlebot.app import create_app, start_socket_mode
+    from aristotlebot.healthcheck import start_health_server
 
     app = create_app()
+
+    # Start health-check server (set HEALTH_CHECK_PORT=0 to disable)
+    health_port = int(os.environ.get("HEALTH_CHECK_PORT", "8080"))
+    if health_port != 0:
+        start_health_server(app=app, port=health_port)
+
     start_socket_mode(app)
 
 

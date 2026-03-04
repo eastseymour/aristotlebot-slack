@@ -7,6 +7,10 @@ Required environment variables:
     SLACK_BOT_TOKEN  — Bot User OAuth Token (xoxb-…)
     SLACK_APP_TOKEN  — App-Level Token (xapp-…)
     ARISTOTLE_API_KEY — API key for aristotlelib
+
+Optional environment variables:
+    LOG_LEVEL         — Logging level (default: INFO)
+    HEALTH_CHECK_PORT — Port for HTTP health check (default: 8080, 0 to disable)
 """
 
 from __future__ import annotations
@@ -48,8 +52,15 @@ def main() -> None:
 
     # Import after env validation so modules can rely on env vars existing
     from aristotlebot.app import create_app, start_socket_mode
+    from aristotlebot.healthcheck import start_health_server
 
     app = create_app()
+
+    # Start health-check server (set HEALTH_CHECK_PORT=0 to disable)
+    health_port = int(os.environ.get("HEALTH_CHECK_PORT", "8080"))
+    if health_port != 0:
+        start_health_server(app=app, port=health_port)
+
     start_socket_mode(app)
 
 
