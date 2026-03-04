@@ -4,9 +4,10 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
 
 ## Features
 
-- **`.lean` file uploads** — Upload a `.lean` file to the bot. It downloads the file, submits it to Aristotle in formal mode, and posts the proof back in-thread.
+- **`.lean` file uploads** — Upload a `.lean` file to the bot. It downloads the file, submits it to Aristotle in formal mode, and posts the proof back as a downloadable `.lean` file attachment.
 - **URLs to `.lean` files** — Paste a URL ending in `.lean` (e.g., from GitHub). The bot downloads and processes it the same as an upload. Slack's angle-bracket URL wrapping (e.g. `<https://example.com/file.lean>`) is handled automatically.
 - **Natural language** — Send any other message and the bot submits it to Aristotle in informal mode (e.g., "Prove that 1 + 1 = 2").
+- **Solution file attachments** — Completed proofs are uploaded as `.lean` file attachments (not inline code blocks). The message contains a brief summary with ✅/❌ status, theorem name, and description. Filenames are derived from the theorem name when possible (e.g., `Nat.add_comm.lean`).
 - **Smart bot filtering** — Only filters the bot's own messages to prevent feedback loops. Messages from other bots/apps (e.g., Klaw) are processed normally. The bot's identity is discovered dynamically at startup via `auth.test`.
 - **Health check endpoint** — HTTP health check on port 8080 reporting Socket Mode connection status, event counts, and registered listeners.
 - **Diagnostic logging** — Verbose logging of all incoming events with raw payloads at DEBUG level for troubleshooting.
@@ -41,6 +42,7 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
    - `channels:history` — required for `message.channels` events
    - `im:history` — required for `message.im` events
    - `files:read` — required to download uploaded files
+   - `files:write` — required to upload solution `.lean` files as attachments
    - `reactions:write` — required to add/remove emoji reactions
 5. **Install the app** to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
 6. **Invite the bot to channels**: The bot must be a member of any channel where it should receive events. Use `/invite @aristotlebot` in each channel.
@@ -118,7 +120,9 @@ Mention the bot in a channel:
 The bot responds in-thread with:
 - An hourglass reaction while processing
 - A progress message
-- The completed proof in a Lean code block, or an error message
+- A brief summary: ✅ or ❌ prefix, theorem name (if detected), and a one-line description
+- The completed proof as a downloadable `.lean` file attachment (not inline code)
+- On error: the error message in the summary text (no file attachment)
 
 ### Health Check
 
@@ -168,9 +172,9 @@ aristotlebot-slack/
 │   ├── __init__.py
 │   ├── __main__.py            # python -m aristotlebot entry point
 │   ├── app.py                 # Slack Bolt app factory + Socket Mode startup + telemetry
-│   ├── handlers.py            # Message handlers for the three input modes
+│   ├── handlers.py            # Message handlers for the three input modes + file upload posting
 │   ├── health.py              # HTTP health-check server (port 8080)
-│   └── utils.py               # File download, message classification, formatting
+│   └── utils.py               # File download/upload, message classification, formatting helpers
 ├── tests/
 │   ├── test_app.py            # App creation, env validation, telemetry tests
 │   ├── test_bot_filtering.py  # Bot message filtering tests (own vs other bot_ids)
