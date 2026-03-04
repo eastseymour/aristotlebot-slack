@@ -34,7 +34,7 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
            health.py (HTTP /health endpoint reports event counts)
 ```
 
-1. **app.py** — Creates a Slack Bolt `App` with sync event listeners. Messages are classified by `utils.classify_message()` into one of three `MessageKind` variants, then dispatched to the async `handle_message()` via `asyncio.run()`. Maintains an `EventTelemetry` singleton that tracks all received events.
+1. **app.py** — Creates a Slack Bolt `App` with sync event listeners. At startup, calls `auth.test` to dynamically discover the bot's own `bot_id` — only messages from this bot_id are filtered (other bots' messages are processed normally). Messages are classified by `utils.classify_message()` into one of three `MessageKind` variants, then dispatched to the async `handle_message()` via `asyncio.run()`. Maintains an `EventTelemetry` singleton that tracks all received events.
 
 2. **handlers.py** — Three handler functions (file upload, URL, natural language). Each:
    - Adds a hourglass reaction
@@ -61,6 +61,8 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 - **`say()` is synchronous**: In the sync Bolt context, `say` and `client` are sync. Handlers do NOT `await` them.
 - **MessageKind enum**: Discriminated union prevents invalid classification states.
 - **Temp dir cleanup**: Always in `finally` blocks. Never leak temp files.
+- **Dynamic bot_id discovery**: At startup, `create_app()` calls `auth.test` to discover the bot's own `bot_id`. This is stored in `_own_bot_id` and used to filter ONLY the bot's own messages. Messages from other bots/apps (like Klaw) are processed normally. The bot_id is never hardcoded.
+- **`_is_own_bot_message()` helper**: Encapsulates the bot message filtering logic. Returns `True` only when the event's `bot_id` matches our own. When `_own_bot_id` is None (e.g., in tests), it conservatively returns `False` (never drops messages).
 - **EventTelemetry singleton**: Module-level dataclass shared between app.py and health.py. All event counts are recorded here for observability.
 - **Diagnostic logging**: All event handlers log with `[DIAG]` prefix at INFO level. Raw payloads logged at DEBUG level. Set `LOG_LEVEL=DEBUG` for full visibility.
 
@@ -114,10 +116,11 @@ src/aristotlebot/
 └── utils.py           # Classification, download, formatting helpers
 
 tests/
-├── test_app.py        # App creation, env validation, telemetry tests
-├── test_handlers.py   # Handler tests (mock aristotlelib + Slack)
-├── test_health.py     # Health endpoint tests
-└── test_utils.py      # Classification, formatting, file reading tests
+├── test_app.py            # App creation, env validation, telemetry tests
+├── test_bot_filtering.py  # Bot message filtering tests (own vs other bot_ids)
+├── test_handlers.py       # Handler tests (mock aristotlelib + Slack)
+├── test_health.py         # Health endpoint tests
+└── test_utils.py          # Classification, formatting, file reading tests
 ```
 
 ## Testing Notes

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import aristotlebot.app as app_module
 from aristotlebot.app import EventTelemetry, create_app, telemetry
 
 

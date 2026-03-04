@@ -7,6 +7,7 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
 - **`.lean` file uploads** — Upload a `.lean` file to the bot. It downloads the file, submits it to Aristotle in formal mode, and posts the proof back in-thread.
 - **URLs to `.lean` files** — Paste a URL ending in `.lean` (e.g., from GitHub). The bot downloads and processes it the same as an upload.
 - **Natural language** — Send any other message and the bot submits it to Aristotle in informal mode (e.g., "Prove that 1 + 1 = 2").
+- **Smart bot filtering** — Only filters the bot's own messages to prevent feedback loops. Messages from other bots/apps (e.g., Klaw) are processed normally. The bot's identity is discovered dynamically at startup via `auth.test`.
 - **Health check endpoint** — HTTP health check on port 8080 reporting Socket Mode connection status, event counts, and registered listeners.
 - **Diagnostic logging** — Verbose logging of all incoming events with raw payloads at DEBUG level for troubleshooting.
 
@@ -172,6 +173,7 @@ aristotlebot-slack/
 │   └── utils.py               # File download, message classification, formatting
 ├── tests/
 │   ├── test_app.py            # App creation, env validation, telemetry tests
+│   ├── test_bot_filtering.py  # Bot message filtering tests (own vs other bot_ids)
 │   ├── test_handlers.py       # Handler tests (mocked aristotlelib + Slack)
 │   ├── test_health.py         # Health endpoint tests
 │   └── test_utils.py          # Utils tests (classification, formatting, download)
