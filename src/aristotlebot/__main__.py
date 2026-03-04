@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""Entry point for the Aristotle Slack bot.
+"""Allow running the bot via ``python -m aristotlebot``.
 
-Reads configuration from environment variables and starts the Socket Mode handler.
-
-Required environment variables:
-    SLACK_BOT_TOKEN  — Bot User OAuth Token (xoxb-…)
-    SLACK_APP_TOKEN  — App-Level Token (xapp-…)
-    ARISTOTLE_API_KEY — API key for aristotlelib
+This module delegates to the main() entry point defined in the
+top-level main.py script.
 """
 
 from __future__ import annotations
@@ -14,10 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-
-# ---------------------------------------------------------------------------
-# Validate required env vars up-front (fail fast)
-# ---------------------------------------------------------------------------
 
 _REQUIRED_ENV_VARS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "ARISTOTLE_API_KEY")
 
@@ -46,7 +37,6 @@ def main() -> None:
 
     _validate_env()
 
-    # Import after env validation so modules can rely on env vars existing
     from aristotlebot.app import create_app, start_socket_mode
     from aristotlebot.health import start_health_server
 
