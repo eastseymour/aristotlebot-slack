@@ -44,7 +44,8 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
    - Cleans up temp files in `finally` blocks
 
 3. **utils.py** — Pure helpers:
-   - `classify_message()` — Classifies Slack events into `MessageKind` enum
+   - `classify_message()` — Classifies Slack events into `MessageKind` enum. Handles Slack's angle-bracket URL wrapping (`<https://...>`) by stripping brackets before matching.
+   - `_strip_slack_angle_brackets()` — Preprocesses Slack event text to unwrap `<URL>` and `<URL|label>` patterns into bare URLs. Leaves non-URL angle brackets (e.g. `<@U12345>`) untouched.
    - `download_slack_file()` / `download_url()` — Async file downloaders
    - `format_result_message()` — Formats Aristotle results for Slack
    - `read_solution_file()` — Reads `.lean` or `.tar.gz` solution files
@@ -60,6 +61,7 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 - **Sync Bolt + async handlers**: We use sync `App` (not `AsyncApp`) because Socket Mode only works reliably with sync Bolt. Async aristotlelib calls run inside `asyncio.run()`.
 - **`say()` is synchronous**: In the sync Bolt context, `say` and `client` are sync. Handlers do NOT `await` them.
 - **MessageKind enum**: Discriminated union prevents invalid classification states.
+- **Slack angle-bracket stripping**: Slack wraps URLs in `<>` in event text (e.g. `<https://example.com/file.lean>`). The `_strip_slack_angle_brackets()` helper normalizes these before URL matching. This is done as a preprocessing step rather than complicating the URL regex, keeping concerns separated.
 - **Temp dir cleanup**: Always in `finally` blocks. Never leak temp files.
 - **Dynamic bot_id discovery**: At startup, `create_app()` calls `auth.test` to discover the bot's own `bot_id`. This is stored in `_own_bot_id` and used to filter ONLY the bot's own messages. Messages from other bots/apps (like Klaw) are processed normally. The bot_id is never hardcoded.
 - **`_is_own_bot_message()` helper**: Encapsulates the bot message filtering logic. Returns `True` only when the event's `bot_id` matches our own. When `_own_bot_id` is None (e.g., in tests), it conservatively returns `False` (never drops messages).
