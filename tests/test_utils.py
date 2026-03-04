@@ -12,6 +12,7 @@ import pytest
 from aristotlebot.utils import (
     ClassifiedMessage,
     MessageKind,
+    _strip_slack_angle_brackets,
     classify_message,
     download_slack_file,
     download_url,
@@ -90,6 +91,133 @@ class TestClassifyMessage:
         event = {"text": "Check https://example.com/lean-tutorial"}
         result = classify_message(event)
         assert result.kind == MessageKind.NATURAL_LANGUAGE
+
+
+# ===================================================================
+# _strip_slack_angle_brackets (unit tests for the helper)
+# ===================================================================
+
+class TestStripSlackAngleBrackets:
+    """Unit tests for _strip_slack_angle_brackets — Slack URL unwrapping."""
+
+    def test_strips_simple_url(self):
+        assert _strip_slack_angle_brackets("<https://example.com>") == "https://example.com"
+
+    def test_strips_url_with_label(self):
+        result = _strip_slack_angle_brackets("<https://example.com|example.com>")
+        assert result == "https://example.com"
+
+    def test_leaves_plain_text_untouched(self):
+        text = "no angle brackets here"
+        assert _strip_slack_angle_brackets(text) == text
+
+    def test_leaves_non_url_angle_brackets_untouched(self):
+        """Slack user mentions like <@U12345> should NOT be stripped."""
+        text = "Hey <@U12345> check this"
+        assert _strip_slack_angle_brackets(text) == text
+
+    def test_strips_multiple_urls(self):
+        text = "See <https://a.com> and <https://b.com>"
+        assert _strip_slack_angle_brackets(text) == "See https://a.com and https://b.com"
+
+    def test_strips_http_url(self):
+        assert _strip_slack_angle_brackets("<http://example.com>") == "http://example.com"
+
+    def test_mixed_urls_and_mentions(self):
+        text = "<@U123> shared <https://example.com/file.lean>"
+        result = _strip_slack_angle_brackets(text)
+        assert result == "<@U123> shared https://example.com/file.lean"
+
+    def test_empty_string(self):
+        assert _strip_slack_angle_brackets("") == ""
+
+    def test_url_with_query_params(self):
+        text = "<https://example.com/file.lean?token=abc>"
+        assert _strip_slack_angle_brackets(text) == "https://example.com/file.lean?token=abc"
+
+
+# ===================================================================
+# classify_message — Slack angle bracket URL handling
+# ===================================================================
+
+class TestClassifyMessageAngleBrackets:
+    """Tests for classify_message handling of Slack's angle-bracket URL wrapping.
+
+    Slack's event API wraps URLs in <> brackets, e.g.:
+        <https://example.com/file.lean>
+    This must still be classified as LEAN_URL with the clean URL as payload.
+    """
+
+    def test_angle_bracket_lean_url(self):
+        """The core bug: Slack-wrapped URL must be detected as LEAN_URL."""
+        event = {"text": "<https://raw.githubusercontent.com/foo/bar.lean>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://raw.githubusercontent.com/foo/bar.lean"
+
+    def test_angle_bracket_url_with_surrounding_text(self):
+        event = {"text": "Check this out: <https://example.com/Theorem.lean> please"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://example.com/Theorem.lean"
+
+    def test_angle_bracket_url_with_label(self):
+        """Slack sometimes adds a label after a pipe: <URL|label>."""
+        event = {"text": "<https://example.com/Foo.lean|example.com/Foo.lean>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://example.com/Foo.lean"
+
+    def test_angle_bracket_non_lean_url_is_natural_language(self):
+        """A non-.lean URL in angle brackets should NOT be classified as LEAN_URL."""
+        event = {"text": "<https://example.com/readme.md>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.NATURAL_LANGUAGE
+
+    def test_multiple_urls_first_lean_wins(self):
+        """With multiple URLs, the first .lean URL should be returned."""
+        event = {"text": "<https://a.com/readme.md> and <https://b.com/Proof.lean>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://b.com/Proof.lean"
+
+    def test_multiple_lean_urls_first_wins(self):
+        """With multiple .lean URLs, the first should be returned."""
+        event = {"text": "<https://a.com/First.lean> and <https://b.com/Second.lean>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://a.com/First.lean"
+
+    def test_angle_bracket_url_with_query_params(self):
+        event = {"text": "<https://raw.github.com/repo/Bar.lean?token=abc>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert "Bar.lean" in result.payload
+        assert ">" not in result.payload
+
+    def test_bare_url_still_works(self):
+        """Bare URLs (no angle brackets) must still work — regression check."""
+        event = {"text": "https://example.com/repo/Foo.lean"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert result.payload == "https://example.com/repo/Foo.lean"
+
+    def test_file_upload_still_takes_priority_over_angle_bracket_url(self):
+        """File uploads have higher priority than angle-bracket URLs."""
+        event = {
+            "text": "<https://example.com/Foo.lean>",
+            "files": [{"name": "Bar.lean", "url_private_download": "https://slack.com/f"}],
+        }
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_FILE_UPLOAD
+
+    def test_payload_never_contains_angle_brackets(self):
+        """Invariant: the payload URL must never contain < or > characters."""
+        event = {"text": "<https://example.com/file.lean>"}
+        result = classify_message(event)
+        assert result.kind == MessageKind.LEAN_URL
+        assert "<" not in result.payload
+        assert ">" not in result.payload
 
 
 # ===================================================================

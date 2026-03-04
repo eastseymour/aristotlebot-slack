@@ -44,6 +44,30 @@ class ClassifiedMessage(NamedTuple):
 # Regex for URLs that end with .lean (possibly with query params)
 _LEAN_URL_RE = re.compile(r"https?://\S+\.lean(?:\?\S*)?(?=#|\s|$)", re.IGNORECASE)
 
+# Slack wraps URLs in angle brackets in event text, e.g. <https://example.com>.
+# This regex matches the <URL> pattern so we can strip the brackets before
+# running the URL classifier.
+_SLACK_ANGLE_BRACKET_RE = re.compile(r"<(https?://[^>|]+)(?:\|[^>]*)?>")
+
+
+def _strip_slack_angle_brackets(text: str) -> str:
+    """Replace Slack's ``<URL>`` and ``<URL|label>`` wrappers with the bare URL.
+
+    Slack's event API wraps URLs in angle brackets, e.g.::
+
+        <https://example.com/file.lean>
+        <https://example.com/file.lean|example.com/file.lean>
+
+    This function strips those wrappers so downstream regexes can match the
+    raw URL.  Non-URL angle-bracket sequences (e.g. ``<@U12345>``) are left
+    untouched because the inner regex requires ``https?://``.
+
+    Postconditions:
+        - Every ``<https://…>`` wrapper in the input is replaced by the bare URL.
+        - The returned string contains no angle-bracket-wrapped HTTP(S) URLs.
+    """
+    return _SLACK_ANGLE_BRACKET_RE.sub(r"\1", text)
+
 
 def classify_message(event: dict) -> ClassifiedMessage:
     """Classify a Slack message event into one of the three input modes.
@@ -53,6 +77,8 @@ def classify_message(event: dict) -> ClassifiedMessage:
 
     Postconditions:
         - Returns exactly one ClassifiedMessage whose kind and payload are consistent.
+        - Angle-bracket-wrapped URLs (Slack formatting) are handled transparently:
+          the returned payload URL never contains surrounding ``<>`` characters.
     """
     # Priority 1: file uploads
     files = event.get("files") or []
@@ -62,8 +88,10 @@ def classify_message(event: dict) -> ClassifiedMessage:
             return ClassifiedMessage(kind=MessageKind.LEAN_FILE_UPLOAD, payload=f)
 
     # Priority 2: URLs to .lean files in the message text
+    # Strip Slack's angle-bracket URL wrappers before matching.
     text = event.get("text") or ""
-    match = _LEAN_URL_RE.search(text)
+    normalized_text = _strip_slack_angle_brackets(text)
+    match = _LEAN_URL_RE.search(normalized_text)
     if match:
         return ClassifiedMessage(kind=MessageKind.LEAN_URL, payload=match.group(0))
 
