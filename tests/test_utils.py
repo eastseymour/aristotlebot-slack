@@ -14,6 +14,7 @@ from aristotlebot.utils import (
     ClassifiedMessage,
     MessageKind,
     _extract_theorem_name,
+    _github_blob_to_raw,
     _make_solution_filename,
     _strip_slack_angle_brackets,
     classify_message,
@@ -223,6 +224,109 @@ class TestClassifyMessageAngleBrackets:
         assert result.kind == MessageKind.LEAN_URL
         assert "<" not in result.payload
         assert ">" not in result.payload
+
+
+# ===================================================================
+# _github_blob_to_raw — GitHub URL normalization
+# ===================================================================
+
+class TestGithubBlobToRaw:
+    """Unit tests for _github_blob_to_raw — converting GitHub blob URLs to raw content URLs.
+
+    The bug: when a user pastes a GitHub blob URL like
+    ``https://github.com/owner/repo/blob/main/path/File.lean``
+    the bot downloads the HTML page instead of the raw file, causing
+    Aristotle to fail with "request failed".
+
+    The fix: convert ``github.com/.../blob/...`` to ``raw.githubusercontent.com/...``
+    before downloading.
+    """
+
+    def test_converts_standard_github_blob_url(self):
+        """Core fix: GitHub blob URLs must be converted to raw URLs."""
+        url = "https://github.com/owner/repo/blob/main/path/File.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/owner/repo/main/path/File.lean"
+
+    def test_converts_exact_bug_report_url(self):
+        """Regression test: the exact URL from the bug report must convert correctly."""
+        url = "https://github.com/Verified-zkEVM/ArkLib/blob/main/ArkLib/Data/Fin/Sigma.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == (
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "main/ArkLib/Data/Fin/Sigma.lean"
+        )
+
+    def test_converts_url_with_specific_commit_ref(self):
+        """Branch/tag/commit refs in the URL path should be preserved."""
+        url = "https://github.com/owner/repo/blob/abc123def/src/File.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/owner/repo/abc123def/src/File.lean"
+
+    def test_converts_url_with_tag_ref(self):
+        """Tag refs should also be converted correctly."""
+        url = "https://github.com/owner/repo/blob/v1.2.3/lib/Core.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/owner/repo/v1.2.3/lib/Core.lean"
+
+    def test_strips_query_params_from_github_url(self):
+        """Query parameters are not used by raw.githubusercontent.com."""
+        url = "https://github.com/owner/repo/blob/main/File.lean?raw=true"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/owner/repo/main/File.lean"
+        assert "?" not in raw
+
+    def test_strips_fragment_from_github_url(self):
+        """Fragment identifiers should be stripped (line numbers etc.)."""
+        url = "https://github.com/owner/repo/blob/main/File.lean#L42"
+        raw = _github_blob_to_raw(url)
+        # The regex [^?#]+ stops at #, so fragment is stripped
+        assert raw == "https://raw.githubusercontent.com/owner/repo/main/File.lean"
+
+    def test_leaves_non_github_url_unchanged(self):
+        """Non-GitHub URLs must be returned unchanged (identity)."""
+        url = "https://example.com/path/File.lean"
+        assert _github_blob_to_raw(url) == url
+
+    def test_leaves_raw_githubusercontent_url_unchanged(self):
+        """Already-raw GitHub URLs must not be double-converted."""
+        url = "https://raw.githubusercontent.com/owner/repo/main/File.lean"
+        assert _github_blob_to_raw(url) == url
+
+    def test_leaves_github_non_blob_url_unchanged(self):
+        """GitHub URLs without /blob/ (e.g. /tree/, /commits/) should be unchanged."""
+        url = "https://github.com/owner/repo/tree/main/src"
+        assert _github_blob_to_raw(url) == url
+
+    def test_handles_deep_nested_path(self):
+        """Deep paths with many levels should convert correctly."""
+        url = "https://github.com/org/repo/blob/main/a/b/c/d/e/Deep.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/org/repo/main/a/b/c/d/e/Deep.lean"
+
+    def test_handles_hyphenated_owner_and_repo(self):
+        """Owner and repo names with hyphens should be preserved."""
+        url = "https://github.com/my-org/my-repo/blob/main/File.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw == "https://raw.githubusercontent.com/my-org/my-repo/main/File.lean"
+
+    def test_handles_dotted_repo_name(self):
+        """Repo names with dots should be preserved."""
+        url = "https://github.com/owner/lean4-mathlib.git/blob/main/File.lean"
+        raw = _github_blob_to_raw(url)
+        assert "lean4-mathlib.git" in raw
+
+    def test_postcondition_no_blob_in_output(self):
+        """Invariant: the output for a GitHub blob URL should never contain '/blob/'."""
+        url = "https://github.com/Verified-zkEVM/ArkLib/blob/main/ArkLib/Data/Fin/Sigma.lean"
+        raw = _github_blob_to_raw(url)
+        assert "/blob/" not in raw
+
+    def test_postcondition_starts_with_raw_githubusercontent(self):
+        """Invariant: converted GitHub URLs must start with raw.githubusercontent.com."""
+        url = "https://github.com/owner/repo/blob/main/File.lean"
+        raw = _github_blob_to_raw(url)
+        assert raw.startswith("https://raw.githubusercontent.com/")
 
 
 # ===================================================================
@@ -783,6 +887,59 @@ class TestDownloadUrl:
             )
 
         assert result.name == "custom.lean"
+
+    @pytest.mark.asyncio
+    async def test_github_blob_url_is_converted_to_raw(self, tmp_path: Path):
+        """Regression test: download_url must convert GitHub blob URLs to raw URLs.
+
+        This is the core fix for the bug where pasting a GitHub blob URL
+        downloaded the HTML page instead of the raw file content.
+        """
+        mock_resp = AsyncMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.read = AsyncMock(return_value=b"-- Lean code, not HTML")
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=_async_context_manager(mock_resp))
+        mock_session_cls = MagicMock(return_value=_async_context_manager(mock_session))
+
+        github_blob_url = (
+            "https://github.com/Verified-zkEVM/ArkLib/blob/main/"
+            "ArkLib/Data/Fin/Sigma.lean"
+        )
+        expected_raw_url = (
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "main/ArkLib/Data/Fin/Sigma.lean"
+        )
+
+        with patch("aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
+            result = await download_url(
+                url=github_blob_url,
+                dest_dir=tmp_path,
+            )
+
+        # Verify the session.get was called with the raw URL, NOT the blob URL
+        mock_session.get.assert_called_once_with(expected_raw_url)
+        assert result.name == "Sigma.lean"
+        assert result.read_bytes() == b"-- Lean code, not HTML"
+
+    @pytest.mark.asyncio
+    async def test_non_github_url_is_not_modified(self, tmp_path: Path):
+        """Non-GitHub URLs must be passed through unchanged to session.get."""
+        mock_resp = AsyncMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.read = AsyncMock(return_value=b"content")
+
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=_async_context_manager(mock_resp))
+        mock_session_cls = MagicMock(return_value=_async_context_manager(mock_session))
+
+        plain_url = "https://example.com/some/File.lean"
+
+        with patch("aristotlebot.utils.aiohttp.ClientSession", mock_session_cls):
+            await download_url(url=plain_url, dest_dir=tmp_path)
+
+        mock_session.get.assert_called_once_with(plain_url)
 
 
 # ===================================================================

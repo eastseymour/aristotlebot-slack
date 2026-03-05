@@ -55,7 +55,8 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 3. **utils.py** — Pure helpers:
    - `classify_message()` — Classifies Slack events into `MessageKind` enum. Handles Slack's angle-bracket URL wrapping (`<https://...>`) by stripping brackets before matching.
    - `_strip_slack_angle_brackets()` — Preprocesses Slack event text to unwrap `<URL>` and `<URL|label>` patterns into bare URLs. Leaves non-URL angle brackets (e.g. `<@U12345>`) untouched.
-   - `download_slack_file()` / `download_url()` — Async file downloaders
+   - `download_slack_file()` / `download_url()` — Async file downloaders. `download_url()` automatically converts GitHub blob URLs to `raw.githubusercontent.com` URLs via `_github_blob_to_raw()`.
+   - `_github_blob_to_raw()` — Converts `github.com/.../blob/...` URLs to `raw.githubusercontent.com/...` so the raw file is downloaded instead of the HTML page view.
    - `format_result_summary()` — Brief summary for Slack (no inline code). Extracts theorem name from solution text.
    - `format_result_message()` — **Legacy** formatter that embeds code inline. Kept for backward compatibility.
    - `upload_slack_file()` — Two-step Slack file upload via `files.getUploadURLExternal` + `files.completeUploadExternal`.
@@ -87,6 +88,7 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 - **Sync Bolt + async handlers**: We use sync `App` (not `AsyncApp`) because Socket Mode only works reliably with sync Bolt. Async aristotlelib calls run inside `asyncio.run()`.
 - **`say()` is synchronous**: In the sync Bolt context, `say` and `client` are sync. Handlers do NOT `await` them. `upload_slack_file()` is also synchronous (uses `client` methods + `urllib.request`).
 - **MessageKind enum**: Discriminated union prevents invalid classification states.
+- **GitHub blob URL normalization**: `download_url()` calls `_github_blob_to_raw()` to convert GitHub blob view URLs (`github.com/{owner}/{repo}/blob/{ref}/{path}`) to raw content URLs (`raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}`). Without this, the bot downloads the HTML page instead of the actual `.lean` file, causing Aristotle to fail. The conversion is transparent to callers.
 - **Slack angle-bracket stripping**: Slack wraps URLs in `<>` in event text (e.g. `<https://example.com/file.lean>`). The `_strip_slack_angle_brackets()` helper normalizes these before URL matching. This is done as a preprocessing step rather than complicating the URL regex, keeping concerns separated.
 - **Import resolution (ARI-6)**: When a `.lean` file is submitted (via URL or upload), the bot parses its `import` statements, fetches dependency files from the same GitHub repo, and passes them as `context_file_paths` to aristotlelib. This gives the LLM visibility into types, theorems, and definitions from imported files. External packages (Mathlib, Std, etc.) are never fetched — they are reported as unresolved. Import resolution is best-effort: failures degrade gracefully (the file is still submitted without context).
 - **Temp dir cleanup**: Always in `finally` blocks. Never leak temp files.

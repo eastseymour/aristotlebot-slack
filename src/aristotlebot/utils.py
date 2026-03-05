@@ -49,6 +49,12 @@ class ClassifiedMessage(NamedTuple):
 # Regex for URLs that end with .lean (possibly with query params)
 _LEAN_URL_RE = re.compile(r"https?://\S+\.lean(?:\?\S*)?(?=#|\s|$)", re.IGNORECASE)
 
+# GitHub blob URL pattern: https://github.com/{owner}/{repo}/blob/{ref}/{path}
+# The raw content equivalent is https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}
+_GITHUB_BLOB_RE = re.compile(
+    r"^https://github\.com/([^/]+)/([^/]+)/blob/([^?#]+)"
+)
+
 # Slack wraps URLs in angle brackets in event text, e.g. <https://example.com>.
 # This regex matches the <URL> pattern so we can strip the brackets before
 # running the URL classifier.
@@ -137,8 +143,41 @@ async def download_slack_file(
     return dest
 
 
+def _github_blob_to_raw(url: str) -> str:
+    """Convert a GitHub blob URL to its raw.githubusercontent.com equivalent.
+
+    GitHub blob URLs (e.g. ``https://github.com/owner/repo/blob/main/path/file.lean``)
+    return an HTML page.  The raw file content is served at
+    ``https://raw.githubusercontent.com/owner/repo/main/path/file.lean``.
+
+    Non-GitHub URLs, or URLs that don't match the ``/blob/`` pattern, are
+    returned unchanged.
+
+    Postconditions:
+        - GitHub blob URLs are converted to raw.githubusercontent.com URLs.
+        - Non-matching URLs are returned unchanged (identity).
+        - Query parameters and fragments are stripped from GitHub blob URLs
+          (raw.githubusercontent.com does not use them).
+
+    >>> _github_blob_to_raw("https://github.com/owner/repo/blob/main/file.lean")
+    'https://raw.githubusercontent.com/owner/repo/main/file.lean'
+    >>> _github_blob_to_raw("https://example.com/file.lean")
+    'https://example.com/file.lean'
+    """
+    match = _GITHUB_BLOB_RE.match(url)
+    if match:
+        owner, repo, rest = match.groups()
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}"
+        logger.debug("Converted GitHub blob URL to raw: %s -> %s", url, raw_url)
+        return raw_url
+    return url
+
+
 async def download_url(url: str, dest_dir: Path, filename: str | None = None) -> Path:
     """Download a file from an arbitrary URL.
+
+    GitHub blob URLs are automatically converted to raw.githubusercontent.com
+    URLs so the actual file content is downloaded (not the HTML page view).
 
     Preconditions:
         - *url* is a valid HTTP(S) URL.
@@ -151,6 +190,10 @@ async def download_url(url: str, dest_dir: Path, filename: str | None = None) ->
         aiohttp.ClientResponseError on non-200 responses.
     """
     assert dest_dir.is_dir(), f"dest_dir must exist: {dest_dir}"
+
+    # Normalize GitHub blob URLs to raw content URLs before downloading
+    url = _github_blob_to_raw(url)
+
     if filename is None:
         # Derive filename from URL path
         filename = url.rsplit("/", 1)[-1].split("?")[0] or "input.lean"
