@@ -42,11 +42,15 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 2. **handlers.py** — Three handler functions (file upload, URL, natural language). Each:
    - Adds a hourglass reaction
    - Downloads/prepares input
-   - Calls `aristotlelib.Project.prove_from_file()`
+   - Resolves Lean 4 imports and fetches dependency files (ARI-6, for URL and file upload handlers)
+   - Calls `aristotlelib.Project.prove_from_file()` with resolved context files
    - Posts a brief summary in-thread (✅/❌ + theorem name + one-line description)
    - Uploads the solution as a `.lean` file attachment (via `upload_slack_file()`)
    - Cleans up temp files in `finally` blocks
    - `_post_result()` — Central helper that posts both the summary and file attachment. Falls back gracefully if file upload fails.
+   - `_resolve_imports_safe()` — Error-handling wrapper for import resolution. Never raises; returns empty `ResolvedImports` on failure.
+   - `_write_context_files()` — Writes resolved dependency files to disk for aristotlelib.
+   - `_report_import_status()` — Posts import resolution status (resolved count, external deps, warnings) to the Slack thread.
 
 3. **utils.py** — Pure helpers:
    - `classify_message()` — Classifies Slack events into `MessageKind` enum. Handles Slack's angle-bracket URL wrapping (`<https://...>`) by stripping brackets before matching.
@@ -60,7 +64,16 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
    - `_make_solution_filename()` — Generates descriptive `.lean` filenames from solution text.
    - `read_solution_file()` — Reads `.lean` or `.tar.gz` solution files
 
-4. **health.py** — HTTP health-check server running on a daemon thread (default port 8080). Reports:
+4. **lean_imports.py** — Lean 4 import parsing and recursive dependency resolution (ARI-6):
+   - `parse_lean_imports()` — Regex-based parser that extracts `import` statements from Lean 4 source, classifying each as LOCAL or EXTERNAL via the `ImportKind` enum.
+   - `import_to_file_path()` — Converts dotted module paths to POSIX file paths (e.g. `ArkLib.Data.Fin.Basic` → `ArkLib/Data/Fin/Basic.lean`).
+   - `extract_github_repo_info()` — Extracts owner, repo, and ref from GitHub raw/blob URLs. Returns `GitHubRepoInfo` or `None`.
+   - `resolve_imports()` — Recursively resolves local imports by fetching files from GitHub. Bounded by `MAX_DEPTH=3` and `MAX_FILES=20`. External packages (Mathlib, Std, Init, etc.) are classified via `EXTERNAL_PACKAGES` frozenset and reported as unresolved.
+   - `format_import_context()` — Formats resolved files into a context string for the LLM.
+   - Key types: `LeanImport` (frozen dataclass), `GitHubRepoInfo` (frozen dataclass), `ResolvedImports` (discriminated result with resolved files and unresolved imports), `UnresolvedImport`.
+   - Invariants: recursive resolution always terminates (bounded depth + file count); cycle detection via visited set; external deps never fetched; all network errors caught and degraded gracefully.
+
+5. **health.py** — HTTP health-check server running on a daemon thread (default port 8080). Reports:
    - Socket Mode connection status
    - Total events received, broken down by type
    - Last event timestamp
@@ -75,6 +88,7 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 - **`say()` is synchronous**: In the sync Bolt context, `say` and `client` are sync. Handlers do NOT `await` them. `upload_slack_file()` is also synchronous (uses `client` methods + `urllib.request`).
 - **MessageKind enum**: Discriminated union prevents invalid classification states.
 - **Slack angle-bracket stripping**: Slack wraps URLs in `<>` in event text (e.g. `<https://example.com/file.lean>`). The `_strip_slack_angle_brackets()` helper normalizes these before URL matching. This is done as a preprocessing step rather than complicating the URL regex, keeping concerns separated.
+- **Import resolution (ARI-6)**: When a `.lean` file is submitted (via URL or upload), the bot parses its `import` statements, fetches dependency files from the same GitHub repo, and passes them as `context_file_paths` to aristotlelib. This gives the LLM visibility into types, theorems, and definitions from imported files. External packages (Mathlib, Std, etc.) are never fetched — they are reported as unresolved. Import resolution is best-effort: failures degrade gracefully (the file is still submitted without context).
 - **Temp dir cleanup**: Always in `finally` blocks. Never leak temp files.
 - **Dynamic bot_id discovery**: At startup, `create_app()` calls `auth.test` to discover the bot's own `bot_id`. This is stored in `_own_bot_id` and used to filter ONLY the bot's own messages. Messages from other bots/apps (like Klaw) are processed normally. The bot_id is never hardcoded.
 - **`_is_own_bot_message()` helper**: Encapsulates the bot message filtering logic. Returns `True` only when the event's `bot_id` matches our own. When `_own_bot_id` is None (e.g., in tests), it conservatively returns `False` (never drops messages).
@@ -116,6 +130,7 @@ result_path = await Project.prove_from_file(
     wait_for_completion=True,
     output_file_path=output_path,
     project_input_type=ProjectInputType.FORMAL_LEAN,
+    context_file_paths=[path_to_dep1, path_to_dep2],  # Optional: resolved imports (ARI-6)
 )
 
 # Informal mode (for natural language)
@@ -148,15 +163,17 @@ src/aristotlebot/
 ├── __init__.py        # Package version
 ├── __main__.py        # python -m aristotlebot entry point
 ├── app.py             # Bolt app factory, event listeners, EventTelemetry
-├── handlers.py        # Three input mode handlers + _post_result helper
+├── handlers.py        # Three input mode handlers + import resolution + _post_result helper
 ├── health.py          # HTTP health-check server
+├── lean_imports.py    # Lean 4 import parsing and recursive dependency resolution (ARI-6)
 └── utils.py           # Classification, download, formatting, file upload helpers
 
 tests/
 ├── test_app.py            # App creation, env validation, telemetry tests
 ├── test_bot_filtering.py  # Bot message filtering tests (own vs other bot_ids)
-├── test_handlers.py       # Handler tests (mock aristotlelib + Slack + file upload)
+├── test_handlers.py       # Handler tests (mock aristotlelib + Slack + file upload + import resolution)
 ├── test_health.py         # Health endpoint tests
+├── test_lean_imports.py   # Import parsing, resolution, context formatting tests (ARI-6)
 └── test_utils.py          # Classification, formatting, file upload, file reading tests
 ```
 
