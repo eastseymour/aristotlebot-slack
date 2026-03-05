@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from aristotlebot.handlers import handle_message, _post_result
+from aristotlebot.handlers import (
+    handle_message,
+    _post_result,
+    _report_import_status,
+    _resolve_imports_safe,
+    _write_context_files,
+)
+from aristotlebot.lean_imports import ResolvedImports, UnresolvedImport
 from aristotlebot.utils import AristotleResult, ClassifiedMessage, MessageKind
 
 
@@ -164,6 +171,7 @@ class TestHandleLeanFileUpload:
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -192,6 +200,7 @@ class TestHandleLeanFileUpload:
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file"),
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -238,6 +247,7 @@ class TestHandleLeanFileUpload:
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
             patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -270,6 +280,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file"),
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -294,6 +305,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file"),
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -340,6 +352,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -377,6 +390,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
@@ -484,6 +498,216 @@ class TestPostResult:
         text = say.call_args.kwargs["text"]
         assert ":white_check_mark:" in text
         assert "File upload failed" in text
+
+
+# ===================================================================
+# Import resolution integration (ARI-6)
+# ===================================================================
+
+class TestImportResolutionInUrlHandler:
+    """Tests verifying import resolution is integrated into the URL handler."""
+
+    @pytest.mark.asyncio
+    async def test_url_handler_resolves_imports(self, slack_event, say, client):
+        """URL handler should resolve imports and pass context to Aristotle."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/File.lean",
+        )
+
+        lean_source = "import ArkLib.Core\ntheorem foo : True := trivial"
+        dep_content = "def core := 1"
+
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/File.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        resolved = ResolvedImports(
+            resolved_files={"ArkLib/Core.lean": dep_content},
+            total_fetched=1,
+            depth_reached=1,
+        )
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
+            patch("aristotlebot.handlers.resolve_imports", AsyncMock(return_value=resolved)),
+            patch("aristotlebot.handlers.extract_github_repo_info", return_value=MagicMock()),
+            patch.object(Path, "read_text", return_value=lean_source),
+            patch("aristotlebot.handlers._write_context_files", return_value=[
+                Path("/tmp/aristotlebot_test/ArkLib/Core.lean"),
+            ]) as mock_write_ctx,
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        # Aristotle should receive context_file_paths
+        mock_prove.assert_called_once()
+        call_kwargs = mock_prove.call_args.kwargs
+        assert "context_file_paths" in call_kwargs
+        assert len(call_kwargs["context_file_paths"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_url_handler_reports_import_status(self, slack_event, say, client):
+        """URL handler should post import status to thread."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/File.lean",
+        )
+
+        resolved = ResolvedImports(
+            resolved_files={"ArkLib/Core.lean": "-- core"},
+            unresolved=[UnresolvedImport("Mathlib.Tactic", "external package: Mathlib")],
+            total_fetched=1,
+            depth_reached=1,
+        )
+
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/File.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
+            patch("aristotlebot.handlers.resolve_imports", AsyncMock(return_value=resolved)),
+            patch("aristotlebot.handlers.extract_github_repo_info", return_value=MagicMock()),
+            patch.object(Path, "read_text", return_value="import ArkLib.Core"),
+            patch("aristotlebot.handlers._write_context_files", return_value=[
+                Path("/tmp/aristotlebot_test/ArkLib/Core.lean"),
+            ]),
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        # Should have posted import status (contains "Resolved" or "External")
+        all_texts = [
+            c.kwargs.get("text", c[1].get("text", ""))
+            for c in say.call_args_list
+        ]
+        import_msgs = [t for t in all_texts if "import" in t.lower() or "Resolved" in t or "External" in t]
+        assert len(import_msgs) >= 1
+
+    @pytest.mark.asyncio
+    async def test_url_handler_continues_without_imports(self, slack_event, say, client):
+        """If import resolution fails, the handler should still submit to Aristotle."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://example.com/Foo.lean",
+        )
+
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value="-- proved"),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
+            patch("aristotlebot.handlers.resolve_imports", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("aristotlebot.handlers.extract_github_repo_info", return_value=None),
+            patch.object(Path, "read_text", return_value="-- no imports"),
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        # Aristotle should still be called (graceful degradation)
+        mock_prove.assert_called_once()
+
+
+class TestWriteContextFiles:
+    """Tests for _write_context_files helper."""
+
+    def test_writes_resolved_files_to_disk(self, tmp_path):
+        resolved = ResolvedImports(
+            resolved_files={
+                "ArkLib/Core.lean": "def core := 1",
+                "ArkLib/Data/Fin/Basic.lean": "def fin_basic := 2",
+            },
+            total_fetched=2,
+        )
+
+        paths = _write_context_files(resolved, tmp_path)
+        assert len(paths) == 2
+
+        # Check files exist and have correct content
+        core_path = tmp_path / "ArkLib" / "Core.lean"
+        assert core_path.exists()
+        assert core_path.read_text() == "def core := 1"
+
+        basic_path = tmp_path / "ArkLib" / "Data" / "Fin" / "Basic.lean"
+        assert basic_path.exists()
+        assert basic_path.read_text() == "def fin_basic := 2"
+
+    def test_empty_resolved_returns_empty_list(self, tmp_path):
+        resolved = ResolvedImports()
+        paths = _write_context_files(resolved, tmp_path)
+        assert paths == []
+
+
+class TestReportImportStatus:
+    """Tests for _report_import_status helper."""
+
+    def test_reports_resolved_count(self):
+        say = MagicMock()
+        resolved = ResolvedImports(
+            resolved_files={"A.lean": "-- a", "B.lean": "-- b"},
+            total_fetched=2,
+            depth_reached=1,
+        )
+        _report_import_status(say, "ts", resolved)
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "2 import(s)" in text
+
+    def test_reports_external_dependencies(self):
+        say = MagicMock()
+        resolved = ResolvedImports(
+            unresolved=[
+                UnresolvedImport("Mathlib.Tactic", "external package: Mathlib"),
+                UnresolvedImport("Std.Data.HashMap", "external package: Std"),
+            ],
+        )
+        _report_import_status(say, "ts", resolved)
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "External dependencies" in text
+        assert "Mathlib" in text
+        assert "Std" in text
+
+    def test_no_imports_does_not_post(self):
+        say = MagicMock()
+        resolved = ResolvedImports()
+        _report_import_status(say, "ts", resolved)
+        say.assert_not_called()
+
+
+class TestResolveImportsSafe:
+    """Tests for _resolve_imports_safe — error-handling wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_error(self):
+        """If resolve_imports raises, returns empty ResolvedImports."""
+        with patch("aristotlebot.handlers.resolve_imports", AsyncMock(side_effect=RuntimeError("boom"))):
+            result = await _resolve_imports_safe("import Foo", MagicMock())
+
+        assert result.total_fetched == 0
+        assert result.unresolved == []
+
+    @pytest.mark.asyncio
+    async def test_passes_through_on_success(self):
+        expected = ResolvedImports(
+            resolved_files={"A.lean": "-- a"},
+            total_fetched=1,
+        )
+        with patch("aristotlebot.handlers.resolve_imports", AsyncMock(return_value=expected)):
+            result = await _resolve_imports_safe("import A", MagicMock())
+
+        assert result.total_fetched == 1
 
 
 # ===================================================================

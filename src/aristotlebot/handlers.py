@@ -28,6 +28,12 @@ from pathlib import Path
 
 from aristotlelib.project import Project, ProjectInputType, ProjectStatus
 
+from .lean_imports import (
+    ResolvedImports,
+    extract_github_repo_info,
+    format_import_context,
+    resolve_imports,
+)
 from .utils import (
     AristotleResult,
     ClassifiedMessage,
@@ -156,7 +162,18 @@ async def _handle_lean_file_upload(
             filename=filename,
         )
 
-        result = await _run_aristotle_formal(input_path, tmp_dir)
+        # For file uploads, we have no repo info so imports can't be resolved.
+        # Still parse and report any imports found (ARI-6).
+        source = input_path.read_text(encoding="utf-8", errors="replace")
+        resolved = await _resolve_imports_safe(source, repo_info=None)
+        context_paths = _write_context_files(resolved, tmp_dir)
+
+        if resolved.unresolved:
+            _report_import_status(say, thread_ts, resolved)
+
+        result = await _run_aristotle_formal(
+            input_path, tmp_dir, context_file_paths=context_paths,
+        )
         _post_result(say, client, channel=channel, thread_ts=thread_ts, result=result)
 
     except Exception:
@@ -180,7 +197,7 @@ async def _handle_lean_url(
     client,
     classified: ClassifiedMessage,
 ) -> None:
-    """Download .lean file from URL, submit to Aristotle, return the proof."""
+    """Download .lean file from URL, resolve imports, submit to Aristotle, return the proof."""
     assert classified.kind == MessageKind.LEAN_URL
     url: str = classified.payload  # type: ignore[assignment]
     channel = event["channel"]
@@ -197,7 +214,18 @@ async def _handle_lean_url(
 
         input_path = await download_url(url=url, dest_dir=tmp_dir)
 
-        result = await _run_aristotle_formal(input_path, tmp_dir)
+        # Resolve Lean 4 imports from the downloaded file (ARI-6).
+        source = input_path.read_text(encoding="utf-8", errors="replace")
+        repo_info = extract_github_repo_info(url)
+        resolved = await _resolve_imports_safe(source, repo_info)
+        context_paths = _write_context_files(resolved, tmp_dir)
+
+        # Report import resolution status in thread.
+        _report_import_status(say, thread_ts, resolved)
+
+        result = await _run_aristotle_formal(
+            input_path, tmp_dir, context_file_paths=context_paths,
+        )
         _post_result(say, client, channel=channel, thread_ts=thread_ts, result=result)
 
     except Exception:
@@ -257,15 +285,26 @@ async def _handle_natural_language(
 # Aristotle submission helpers
 # ---------------------------------------------------------------------------
 
-async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> AristotleResult:
+async def _run_aristotle_formal(
+    input_path: Path,
+    tmp_dir: Path,
+    *,
+    context_file_paths: list[Path] | None = None,
+) -> AristotleResult:
     """Submit a .lean file to Aristotle (formal mode) and return the result.
+
+    Args:
+        input_path: Path to the main .lean file.
+        tmp_dir: Temporary directory for output.
+        context_file_paths: Optional list of resolved dependency files to
+            include as context for the LLM (ARI-6).
 
     Postconditions:
         - Always returns an AristotleResult (never raises to the caller).
     """
     output_path = tmp_dir / "solution.lean"
     try:
-        result_path_str = await Project.prove_from_file(
+        kwargs: dict = dict(
             input_file_path=input_path,
             validate_lean_project=False,
             auto_add_imports=False,
@@ -273,6 +312,10 @@ async def _run_aristotle_formal(input_path: Path, tmp_dir: Path) -> AristotleRes
             output_file_path=output_path,
             project_input_type=ProjectInputType.FORMAL_LEAN,
         )
+        if context_file_paths:
+            kwargs["context_file_paths"] = context_file_paths
+
+        result_path_str = await Project.prove_from_file(**kwargs)
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
         return AristotleResult(status="COMPLETE", solution_text=solution_text)
@@ -301,6 +344,83 @@ async def _run_aristotle_informal(prompt: str, tmp_dir: Path) -> AristotleResult
     except Exception as exc:
         logger.exception("Aristotle informal submission failed")
         return AristotleResult(status="FAILED", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Import resolution helpers (ARI-6)
+# ---------------------------------------------------------------------------
+
+async def _resolve_imports_safe(
+    source: str,
+    repo_info: "GitHubRepoInfo | None",
+) -> ResolvedImports:
+    """Resolve imports with error handling. Never raises.
+
+    If import resolution fails entirely, returns an empty ResolvedImports
+    so the bot can still submit the file without context.
+    """
+    try:
+        return await resolve_imports(source, repo_info)
+    except Exception:
+        logger.exception("Import resolution failed; proceeding without context")
+        return ResolvedImports()
+
+
+def _write_context_files(
+    resolved: ResolvedImports,
+    tmp_dir: Path,
+) -> list[Path]:
+    """Write resolved import files to disk and return their paths.
+
+    Each resolved file is written to a subdirectory matching its relative
+    path within the repository (e.g. ``ArkLib/Data/Fin/Basic.lean``).
+
+    Returns:
+        List of Paths to the written files (empty if none resolved).
+    """
+    paths: list[Path] = []
+    for rel_path, content in resolved.resolved_files.items():
+        dest = tmp_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        paths.append(dest)
+    return paths
+
+
+def _report_import_status(
+    say,
+    thread_ts: str,
+    resolved: ResolvedImports,
+) -> None:
+    """Post a brief status message about import resolution in the thread."""
+    if not resolved.resolved_files and not resolved.unresolved:
+        return  # No imports found; nothing to report.
+
+    parts: list[str] = []
+
+    if resolved.resolved_files:
+        parts.append(
+            f":package: Resolved {resolved.total_fetched} import(s) "
+            f"as context (depth {resolved.depth_reached})"
+        )
+
+    # Summarize unresolved imports by category.
+    external = [u for u in resolved.unresolved if "external package" in u.reason]
+    other_unresolved = [u for u in resolved.unresolved if "external package" not in u.reason]
+
+    if external:
+        pkg_names = sorted({u.module_path.split(".")[0] for u in external})
+        parts.append(
+            f":memo: External dependencies (not fetched): {', '.join(pkg_names)}"
+        )
+
+    if other_unresolved:
+        parts.append(
+            f":warning: {len(other_unresolved)} import(s) could not be resolved"
+        )
+
+    if parts:
+        say(text="\n".join(parts), thread_ts=thread_ts)
 
 
 # ---------------------------------------------------------------------------
