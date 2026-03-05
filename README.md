@@ -5,7 +5,7 @@ A Slack bot that wraps [Aristotle Agent v2](https://aristotle.ai) for Lean theor
 ## Features
 
 - **`.lean` file uploads** — Upload a `.lean` file to the bot. It downloads the file, submits it to Aristotle in formal mode, and posts the proof back as a downloadable `.lean` file attachment.
-- **URLs to `.lean` files** — Paste a URL ending in `.lean` (e.g., from GitHub). The bot downloads and processes it the same as an upload. Slack's angle-bracket URL wrapping (e.g. `<https://example.com/file.lean>`) is handled automatically.
+- **URLs to `.lean` files** — Paste a URL ending in `.lean` (e.g., from GitHub). The bot downloads and processes it the same as an upload. GitHub blob URLs (e.g. `https://github.com/owner/repo/blob/main/File.lean`) are automatically converted to raw content URLs. Slack's angle-bracket URL wrapping (e.g. `<https://example.com/file.lean>`) is handled automatically.
 - **Natural language** — Send any other message and the bot submits it to Aristotle in informal mode (e.g., "Prove that 1 + 1 = 2").
 - **Solution file attachments** — Completed proofs are uploaded as `.lean` file attachments (not inline code blocks). The message contains a brief summary with ✅/❌ status, theorem name, and description. Filenames are derived from the theorem name when possible (e.g., `Nat.add_comm.lean`).
 - **Smart bot filtering** — Only filters the bot's own messages to prevent feedback loops. Messages from other bots/apps (e.g., Klaw) are processed normally. The bot's identity is discovered dynamically at startup via `auth.test`.
