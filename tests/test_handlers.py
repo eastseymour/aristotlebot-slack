@@ -390,6 +390,7 @@ class TestHandleLeanUrl:
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
             patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+            patch.object(Path, "read_text", return_value="-- mock lean source"),
         ):
             await handle_message(slack_event, say, client, classified)
 
