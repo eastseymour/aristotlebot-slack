@@ -348,6 +348,49 @@ class TestHandleLeanUrl:
         assert upload_kwargs["content"] == solution
         assert upload_kwargs["filename"] == "my_lemma.lean"
 
+    @pytest.mark.asyncio
+    async def test_github_blob_url_passes_through_to_download_url(self, slack_event, say, client):
+        """Regression test: GitHub blob URL is passed to download_url which converts it.
+
+        The URL handler passes the raw URL to download_url; the conversion to
+        raw.githubusercontent.com happens inside download_url itself (via
+        _github_blob_to_raw). This test verifies the handler passes the URL
+        correctly and the full flow succeeds.
+        """
+        github_blob_url = (
+            "https://github.com/Verified-zkEVM/ArkLib/blob/main/"
+            "ArkLib/Data/Fin/Sigma.lean"
+        )
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload=github_blob_url,
+        )
+
+        solution = "def sigma_equiv : True := trivial"
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Sigma.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value=solution),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file") as mock_upload,
+        ):
+            await handle_message(slack_event, say, client, classified)
+
+        # download_url should receive the GitHub blob URL (it handles conversion internally)
+        mock_download.assert_called_once()
+        call_kwargs = mock_download.call_args.kwargs
+        assert call_kwargs["url"] == github_blob_url
+
+        # Aristotle should be called
+        mock_prove.assert_called_once()
+
+        # Solution should be uploaded
+        mock_upload.assert_called_once()
+
 
 # ===================================================================
 # _post_result helper
