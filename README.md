@@ -195,6 +195,21 @@ aristotlebot-slack/
 └── CLAUDE.md
 ```
 
+## Production Deployment
+
+The bot is deployed as a **systemd service** on a GCP Compute Engine VM:
+
+| Property        | Value                                            |
+| --------------- | ------------------------------------------------ |
+| **VM**          | `klaw-controller` (e2-medium, Ubuntu 24.04)      |
+| **Zone**        | `us-central1-a`                                  |
+| **GCP Project** | `klaw-488307`                                    |
+| **Service**     | `aristotlebot.service` (systemd, auto-restart)   |
+| **Health**      | `http://localhost:8080/health`                   |
+| **Logs**        | `journalctl -u aristotlebot.service -f`          |
+
+See [`reports/ari-10-deployment-investigation.md`](reports/ari-10-deployment-investigation.md) for the full deployment investigation report and architecture diagram.
+
 ## License
 
 Internal use.
