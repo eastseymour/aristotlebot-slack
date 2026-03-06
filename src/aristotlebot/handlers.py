@@ -34,6 +34,7 @@ from .lean_imports import (
     format_import_context,
     resolve_imports,
 )
+from .playground import lean_playground_url
 from .utils import (
     AristotleResult,
     ClassifiedMessage,
@@ -81,14 +82,15 @@ def _post_result(
     thread_ts: str,
     result: AristotleResult,
 ) -> None:
-    """Post an Aristotle result: summary message + .lean file attachment.
+    """Post an Aristotle result: summary message + .lean file attachment + playground link.
 
     For successful completions with solution text:
         - Posts a brief summary message (no inline code).
         - Uploads the solution as a .lean file attachment in the same thread.
+        - Generates and appends a Lean 4 playground link for interactive verification.
 
     For errors or empty results:
-        - Posts only the summary message (no file upload).
+        - Posts only the summary message (no file upload, no playground link).
 
     Preconditions:
         - *result* is a valid AristotleResult.
@@ -115,6 +117,11 @@ def _post_result(
         except Exception:
             logger.exception("Failed to upload solution file; falling back to summary only")
             summary += "\n_(File upload failed; solution not attached.)_"
+
+        # Generate Lean 4 playground link for interactive verification
+        playground_url = lean_playground_url(result.solution_text)
+        if playground_url:
+            summary += f"\n:link: <{playground_url}|Open in Lean 4 Playground>"
 
     say(text=summary, thread_ts=thread_ts)
 

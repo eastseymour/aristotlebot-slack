@@ -38,10 +38,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Maximum recursion depth for import resolution (0 = only direct imports).
-MAX_DEPTH: int = 3
+MAX_DEPTH: int = 10
 
 #: Maximum total files to fetch during import resolution.
-MAX_FILES: int = 20
+MAX_FILES: int = 50
 
 #: Known external Lean 4 packages that we cannot resolve from the source repo.
 #: These are reported as unresolved rather than attempted.
@@ -167,15 +167,20 @@ def import_to_file_path(module_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 #: Regex to extract owner, repo, and ref+path from a GitHub raw URL.
+#: The ref can be a simple name (``main``, ``v1.0``, a commit hash) or a
+#: multi-segment ref path (``refs/heads/main``, ``refs/tags/v1.0``).
 _RAW_GITHUB_RE = re.compile(
     r"^https://raw\.githubusercontent\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<ref>[^/]+)/(?P<path>.+)$"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
+    r"(?P<ref>refs/(?:heads|tags)/[^/]+|[^/]+)/(?P<path>.+)$"
 )
 
 #: Regex to extract owner, repo, ref, and path from a GitHub blob URL.
+#: Like the raw URL regex, the ref may be multi-segment (``refs/heads/main``).
 _BLOB_GITHUB_RE = re.compile(
     r"^https://github\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+?)(?:\?[^#]*)?(?:#.*)?$"
+    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/"
+    r"(?P<ref>refs/(?:heads|tags)/[^/]+|[^/]+)/(?P<path>.+?)(?:\?[^#]*)?(?:#.*)?$"
 )
 
 
