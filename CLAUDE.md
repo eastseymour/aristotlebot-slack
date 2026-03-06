@@ -223,3 +223,48 @@ The most likely root cause is that the Slack app doesn't have Event Subscription
 5. After changing scopes/events, the app may need to be **reinstalled** to the workspace
 
 Use `LOG_LEVEL=DEBUG` and check the health endpoint (`curl localhost:8080/health`) to verify whether events are arriving.
+
+## Production Deployment (ARI-10)
+
+The bot runs as a **systemd service** on a GCP Compute Engine VM. See `reports/ari-10-deployment-investigation.md` for the full investigation report.
+
+### Quick Reference
+
+| Property          | Value                                                |
+| ----------------- | ---------------------------------------------------- |
+| **VM**            | `klaw-controller`                                    |
+| **Zone**          | `us-central1-a`                                      |
+| **GCP Project**   | `klaw-488307`                                        |
+| **Machine Type**  | `e2-medium` (Ubuntu 24.04)                           |
+| **Internal IP**   | `10.0.0.2`                                           |
+| **Service**       | `aristotlebot.service` (systemd)                     |
+| **Working Dir**   | `/var/lib/openclaw/agents/aristotlebot-slack`         |
+| **Entry Point**   | `.venv/bin/python main.py`                           |
+| **Secrets**       | `/etc/klaw/aristotlebot.env` (+ GCP Secret Manager)  |
+| **Health Check**  | `http://localhost:8080/health`                       |
+| **Logs**          | `journalctl -u aristotlebot.service`                 |
+
+### Service Management
+
+```bash
+systemctl status aristotlebot.service    # Check status
+systemctl restart aristotlebot.service   # Restart after code update
+journalctl -u aristotlebot.service -f    # Follow logs
+curl http://localhost:8080/health        # Health check
+```
+
+### Deployment Process
+
+There is no CI/CD pipeline. To deploy code changes:
+1. SSH into `klaw-controller` (or run from the VM)
+2. `cd /var/lib/openclaw/agents/aristotlebot-slack`
+3. `git pull origin main`
+4. `systemctl restart aristotlebot.service`
+
+### Service Configuration
+
+The systemd unit file is at `/etc/systemd/system/aristotlebot.service`:
+- **Restart policy**: `on-failure` with 10-second delay
+- **Enabled on boot**: Yes
+- **Environment**: Loaded from `/etc/klaw/aristotlebot.env`
+- **Runs as**: root (recommendation: switch to dedicated user)
