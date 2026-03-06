@@ -4,12 +4,14 @@ This module handles:
     1. Parsing ``import`` statements from Lean 4 source code.
     2. Resolving import paths to file paths within a GitHub repository.
     3. Recursively fetching imported files with depth and count limits.
-    4. Classifying imports as local (same repo) vs external (Mathlib, Std, etc.).
+    4. Classifying imports as local (same repo) vs external.
 
 Invariants:
     - Recursive resolution always terminates (bounded by MAX_DEPTH and MAX_FILES).
-    - External dependencies (Mathlib, Std, etc.) are never fetched; they are
-      reported as unresolved rather than failing silently.
+    - Only imports whose top-level module matches the repo name are fetched
+      (allowlist approach, ARI-14). All other imports are external by definition.
+    - The ``EXTERNAL_PACKAGES`` frozenset is kept for ``parse_lean_imports``
+      classification, but the resolver uses the repo name as the filter.
     - All network errors during import fetching are caught and logged; they
       degrade gracefully (the import is marked as unresolved).
 
@@ -325,10 +327,11 @@ async def resolve_imports(
 
     This function:
         1. Parses ``import`` statements from *source*.
-        2. For local imports, constructs the file path and fetches from GitHub.
-        3. Recursively resolves imports from fetched files.
+        2. For same-repo imports (top-level module == repo name), constructs
+           the file path and fetches from GitHub.
+        3. Recursively resolves imports from fetched files (transitive closure).
         4. Stops at *max_depth* levels or *max_files* total files.
-        5. Reports external dependencies (Mathlib, etc.) as unresolved.
+        5. Reports all non-same-repo imports as external/unresolved.
 
     Preconditions:
         - *source* is valid Lean 4 source text.
@@ -339,6 +342,8 @@ async def resolve_imports(
         - total_fetched <= max_files.
         - depth_reached <= max_depth.
         - No import is both resolved and unresolved.
+        - Only imports whose top-level module == ``repo_info.repo`` are fetched
+          (ARI-14 allowlist invariant).
 
     When *repo_info* is None, all imports are reported as unresolved (we don't
     know where to fetch them from).
@@ -355,6 +360,10 @@ async def resolve_imports(
             ))
         return result
 
+    # The project name is the repo name — only imports starting with this
+    # prefix belong to this repo (ARI-14).
+    project_name = repo_info.repo
+
     # Track already-visited module paths to avoid cycles.
     visited: set[str] = set()
 
@@ -363,6 +372,7 @@ async def resolve_imports(
             session=session,
             source=source,
             repo_info=repo_info,
+            project_name=project_name,
             result=result,
             visited=visited,
             current_depth=0,
@@ -378,13 +388,21 @@ async def _resolve_recursive(
     session: aiohttp.ClientSession,
     source: str,
     repo_info: GitHubRepoInfo,
+    project_name: str,
     result: ResolvedImports,
     visited: set[str],
     current_depth: int,
     max_depth: int,
     max_files: int,
 ) -> None:
-    """Internal recursive resolver. Mutates *result* and *visited* in-place."""
+    """Internal recursive resolver. Mutates *result* and *visited* in-place.
+
+    Invariant (ARI-14): Only imports whose top-level module matches
+    *project_name* are fetched. All other imports are treated as external
+    dependencies, regardless of whether they appear in EXTERNAL_PACKAGES.
+    This prevents 404 errors from trying to fetch Mathlib/Std/etc. from
+    the source repo.
+    """
     imports = parse_lean_imports(source)
 
     for imp in imports:
@@ -393,8 +411,11 @@ async def _resolve_recursive(
             continue
         visited.add(imp.module_path)
 
-        # External packages: report as unresolved.
-        if imp.kind == ImportKind.EXTERNAL:
+        # Allowlist check (ARI-14): only fetch imports whose top-level
+        # module matches the repo's project name.  Everything else is
+        # external by definition — we never try to fetch it.
+        is_same_repo = imp.top_level_package == project_name
+        if not is_same_repo:
             result.unresolved.append(UnresolvedImport(
                 module_path=imp.module_path,
                 reason=f"external package: {imp.top_level_package}",
@@ -409,7 +430,7 @@ async def _resolve_recursive(
             ))
             continue
 
-        # Resolve local import.
+        # Resolve same-repo import.
         file_path = import_to_file_path(imp.module_path)
         url = repo_info.raw_url_for(file_path)
 
@@ -432,6 +453,7 @@ async def _resolve_recursive(
                 session=session,
                 source=content,
                 repo_info=repo_info,
+                project_name=project_name,
                 result=result,
                 visited=visited,
                 current_depth=current_depth + 1,
@@ -442,7 +464,7 @@ async def _resolve_recursive(
             # Check if there are deeper imports we can't follow.
             deeper_imports = parse_lean_imports(content)
             for deeper in deeper_imports:
-                if deeper.module_path not in visited and deeper.kind == ImportKind.LOCAL:
+                if deeper.module_path not in visited and deeper.top_level_package == project_name:
                     result.unresolved.append(UnresolvedImport(
                         module_path=deeper.module_path,
                         reason=f"depth limit reached ({max_depth})",

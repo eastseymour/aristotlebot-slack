@@ -562,6 +562,216 @@ class TestResolveImports:
 
 
 # ===================================================================
+# Same-repo-only import filtering (ARI-14)
+# ===================================================================
+
+class TestSameRepoImportFiltering:
+    """Tests for ARI-14: only fetch imports whose top-level module matches the repo name.
+
+    The resolver uses an allowlist approach: only imports starting with the
+    repo name (e.g. 'ArkLib' for repo 'ArkLib') are fetched. Everything else
+    is treated as external, regardless of whether it's in EXTERNAL_PACKAGES.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_repo_import_not_fetched(self):
+        """Imports from packages other than the repo should NOT be fetched.
+
+        Even if 'SomeNewLib' is not in EXTERNAL_PACKAGES, it should still
+        be treated as external because it doesn't match the repo name.
+        """
+        source = "import SomeNewLib.Foo\nimport ArkLib.Core"
+        repo_info = GitHubRepoInfo(owner="org", repo="ArkLib", ref="main")
+
+        url_map = {
+            "https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/Core.lean": "-- core",
+            # SomeNewLib should NOT be fetched — no URL entry needed
+        }
+
+        mock_session = _make_mock_session(url_map)
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        # Only ArkLib.Core should be fetched
+        assert result.total_fetched == 1
+        assert "ArkLib/Core.lean" in result.resolved_files
+        # SomeNewLib should be unresolved as external
+        unresolved_paths = [u.module_path for u in result.unresolved]
+        assert "SomeNewLib.Foo" in unresolved_paths
+        # Verify it was classified as external, not fetch-failed
+        somenewlib = next(u for u in result.unresolved if u.module_path == "SomeNewLib.Foo")
+        assert "external package" in somenewlib.reason
+
+    @pytest.mark.asyncio
+    async def test_mathlib_never_fetched_from_arklib_repo(self):
+        """Mathlib imports must never be fetched from the ArkLib repo (ARI-14).
+
+        This is the exact bug that caused 404 errors in production.
+        """
+        source = (
+            "import ArkLib.Data.Polynomial.RationalFunctions\n"
+            "import Mathlib.Tactic\n"
+            "import Mathlib.Data.Fintype.Basic\n"
+            "import Std.Data.HashMap\n"
+            "import Init.Prelude\n"
+            "import Lean.Elab.Tactic\n"
+        )
+        repo_info = GitHubRepoInfo(owner="Verified-zkEVM", repo="ArkLib", ref="main")
+
+        url_map = {
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/main/"
+            "ArkLib/Data/Polynomial/RationalFunctions.lean": "-- rational functions",
+        }
+
+        mock_session = _make_mock_session(url_map)
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        # Only the ArkLib import should be fetched
+        assert result.total_fetched == 1
+        assert "ArkLib/Data/Polynomial/RationalFunctions.lean" in result.resolved_files
+
+        # All non-ArkLib imports should be external
+        unresolved_paths = {u.module_path for u in result.unresolved}
+        assert "Mathlib.Tactic" in unresolved_paths
+        assert "Mathlib.Data.Fintype.Basic" in unresolved_paths
+        assert "Std.Data.HashMap" in unresolved_paths
+        assert "Init.Prelude" in unresolved_paths
+        assert "Lean.Elab.Tactic" in unresolved_paths
+
+    @pytest.mark.asyncio
+    async def test_unknown_package_treated_as_external(self):
+        """Packages not in EXTERNAL_PACKAGES should still be external if they
+        don't match the repo name.
+
+        Postcondition: the resolver NEVER tries to fetch from a URL that
+        doesn't match the repo name.
+        """
+        source = "import VeryObscureLib.Something"
+        repo_info = GitHubRepoInfo(owner="org", repo="ArkLib", ref="main")
+
+        # Track all fetched URLs
+        fetched_urls = []
+        original_make_mock = _make_mock_session
+
+        def tracking_mock(url_map):
+            session = original_make_mock(url_map)
+            original_get = session.get
+            def tracking_get(url):
+                fetched_urls.append(url)
+                return original_get(url)
+            session.get = tracking_get
+            return session
+
+        mock_session = tracking_mock({})
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        # Should NOT have attempted to fetch VeryObscureLib from ArkLib repo
+        assert len(fetched_urls) == 0, f"Should not fetch any URLs but fetched: {fetched_urls}"
+        assert result.total_fetched == 0
+        assert len(result.unresolved) == 1
+        assert "external package" in result.unresolved[0].reason
+
+    @pytest.mark.asyncio
+    async def test_transitive_imports_resolved_recursively(self):
+        """ARI-14: Transitive same-repo imports must be resolved.
+
+        If A imports B, and B imports C (all in same repo), C must be fetched.
+        """
+        source = "import ArkLib.A"
+        repo_info = GitHubRepoInfo(owner="org", repo="ArkLib", ref="main")
+
+        url_map = {
+            "https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/A.lean":
+                "import ArkLib.B\nimport Mathlib.Tactic\ndef a := 1",
+            "https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/B.lean":
+                "import ArkLib.C\ndef b := 2",
+            "https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/C.lean":
+                "def c := 3",
+        }
+
+        mock_session = _make_mock_session(url_map)
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        # All three ArkLib files should be resolved
+        assert result.total_fetched == 3
+        assert "ArkLib/A.lean" in result.resolved_files
+        assert "ArkLib/B.lean" in result.resolved_files
+        assert "ArkLib/C.lean" in result.resolved_files
+        # Mathlib should be unresolved
+        unresolved_paths = [u.module_path for u in result.unresolved]
+        assert "Mathlib.Tactic" in unresolved_paths
+        # Depth should reflect the 3 levels
+        assert result.depth_reached == 3
+
+    @pytest.mark.asyncio
+    async def test_transitive_with_mixed_external_deps(self):
+        """Real-world scenario: each file in the chain imports external deps.
+
+        The resolver should only fetch same-repo files and skip all external
+        deps at every level.
+        """
+        source = "import ArkLib.ProofSystem.Component.CheckClaim"
+        repo_info = GitHubRepoInfo(
+            owner="Verified-zkEVM", repo="ArkLib",
+            ref="27ff62470e9947f72ddd978db458ee622f8bdcd1",
+        )
+
+        url_map = {
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "27ff62470e9947f72ddd978db458ee622f8bdcd1/"
+            "ArkLib/ProofSystem/Component/CheckClaim.lean":
+                "import ArkLib.Data.Fin.Basic\nimport Mathlib.Tactic\nimport VCVio.OracleComp\ndef check := 1",
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "27ff62470e9947f72ddd978db458ee622f8bdcd1/"
+            "ArkLib/Data/Fin/Basic.lean":
+                "import ArkLib.Data.Fin.Core\nimport CompPoly.Data.Classes\ndef fin_basic := 2",
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "27ff62470e9947f72ddd978db458ee622f8bdcd1/"
+            "ArkLib/Data/Fin/Core.lean":
+                "import Mathlib.Data.Fintype.Basic\ndef fin_core := 3",
+        }
+
+        mock_session = _make_mock_session(url_map)
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        # All ArkLib files should be resolved
+        assert result.total_fetched == 3
+        assert "ArkLib/ProofSystem/Component/CheckClaim.lean" in result.resolved_files
+        assert "ArkLib/Data/Fin/Basic.lean" in result.resolved_files
+        assert "ArkLib/Data/Fin/Core.lean" in result.resolved_files
+
+        # External deps from all levels should be unresolved
+        unresolved_paths = {u.module_path for u in result.unresolved}
+        assert "Mathlib.Tactic" in unresolved_paths
+        assert "VCVio.OracleComp" in unresolved_paths
+        assert "CompPoly.Data.Classes" in unresolved_paths
+        assert "Mathlib.Data.Fintype.Basic" in unresolved_paths
+
+    @pytest.mark.asyncio
+    async def test_non_matching_repo_name_is_external(self):
+        """If the repo is 'MyProject', only 'MyProject.*' imports are local."""
+        source = "import MyProject.Core\nimport ArkLib.Something"
+        repo_info = GitHubRepoInfo(owner="org", repo="MyProject", ref="main")
+
+        url_map = {
+            "https://raw.githubusercontent.com/org/MyProject/main/MyProject/Core.lean": "-- core",
+        }
+
+        mock_session = _make_mock_session(url_map)
+        with patch("aristotlebot.lean_imports.aiohttp.ClientSession", return_value=_acm(mock_session)):
+            result = await resolve_imports(source, repo_info)
+
+        assert result.total_fetched == 1
+        assert "MyProject/Core.lean" in result.resolved_files
+        unresolved_paths = [u.module_path for u in result.unresolved]
+        assert "ArkLib.Something" in unresolved_paths
+
+
+# ===================================================================
 # format_import_context
 # ===================================================================
 

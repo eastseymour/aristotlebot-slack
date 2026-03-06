@@ -50,6 +50,36 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+#: Sentinel phrases that indicate Aristotle returned an error in the output
+#: file rather than an actual solution. When any of these appear in the
+#: solution text, the result should be treated as a failure (ARI-14).
+_ARISTOTLE_ERROR_SENTINELS: tuple[str, ...] = (
+    "Aristotle encountered an error",
+    "encountered an error processing this file",
+    "error processing this file",
+    "Internal server error",
+)
+
+
+def _detect_api_error(solution_text: str | None) -> str | None:
+    """Check if solution text contains an Aristotle error message.
+
+    Returns the error message if detected, None otherwise.
+
+    Postcondition: if this returns non-None, the solution text should be
+    treated as an error, not a valid proof (ARI-14).
+    """
+    if not solution_text:
+        return None
+    for sentinel in _ARISTOTLE_ERROR_SENTINELS:
+        if sentinel.lower() in solution_text.lower():
+            # Return the first line as the error summary
+            first_line = solution_text.strip().split("\n", 1)[0]
+            if len(first_line) > 300:
+                first_line = first_line[:300] + "…"
+            return first_line
+    return None
+
 
 async def handle_message(event: dict, say, client, classified: ClassifiedMessage) -> None:
     """Dispatch to the appropriate handler based on message classification.
@@ -362,6 +392,13 @@ async def _run_aristotle_formal(
 
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
+
+        # Check for Aristotle error messages embedded in the output (ARI-14).
+        api_error = _detect_api_error(solution_text)
+        if api_error:
+            logger.warning("Aristotle returned error in output file: %s", api_error)
+            return AristotleResult(status="FAILED", error=api_error)
+
         return AristotleResult(status="COMPLETE", solution_text=solution_text)
     except Exception as exc:
         logger.exception("Aristotle formal submission failed")
@@ -384,6 +421,13 @@ async def _run_aristotle_informal(prompt: str, tmp_dir: Path) -> AristotleResult
         )
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
+
+        # Check for Aristotle error messages embedded in the output (ARI-14).
+        api_error = _detect_api_error(solution_text)
+        if api_error:
+            logger.warning("Aristotle returned error in output file: %s", api_error)
+            return AristotleResult(status="FAILED", error=api_error)
+
         return AristotleResult(status="COMPLETE", solution_text=solution_text)
     except Exception as exc:
         logger.exception("Aristotle informal submission failed")

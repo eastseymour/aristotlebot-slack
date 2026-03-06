@@ -10,6 +10,7 @@ import pytest
 
 from aristotlebot.handlers import (
     handle_message,
+    _detect_api_error,
     _post_result,
     _report_import_status,
     _resolve_imports_safe,
@@ -847,6 +848,93 @@ class TestPlaygroundLinkInResults:
         # All playground URLs must be inside <URL|label> brackets
         naked_urls = re.findall(r"(?<![<])https://live\.lean-lang\.org", text)
         assert len(naked_urls) == 0, "Playground URL must be inside <URL|label> Slack link"
+
+
+# ===================================================================
+# Error detection in API responses (ARI-14)
+# ===================================================================
+
+class TestDetectApiError:
+    """Tests for _detect_api_error — detecting Aristotle errors in output files."""
+
+    def test_detects_aristotle_error_message(self):
+        """Error sentinel in solution text should be detected."""
+        text = "Aristotle encountered an error processing this file."
+        error = _detect_api_error(text)
+        assert error is not None
+        assert "Aristotle encountered an error" in error
+
+    def test_detects_error_case_insensitive(self):
+        """Error detection should be case-insensitive."""
+        text = "ARISTOTLE ENCOUNTERED AN ERROR processing this file"
+        error = _detect_api_error(text)
+        assert error is not None
+
+    def test_detects_internal_server_error(self):
+        text = "Internal server error: something went wrong"
+        error = _detect_api_error(text)
+        assert error is not None
+        assert "Internal server error" in error
+
+    def test_returns_none_for_valid_solution(self):
+        """Valid Lean code should not be detected as an error."""
+        text = "theorem foo : True := trivial"
+        assert _detect_api_error(text) is None
+
+    def test_returns_none_for_none_input(self):
+        assert _detect_api_error(None) is None
+
+    def test_returns_none_for_empty_string(self):
+        assert _detect_api_error("") is None
+
+    def test_truncates_long_error(self):
+        """Very long error messages should be truncated."""
+        text = "Aristotle encountered an error: " + "x" * 500
+        error = _detect_api_error(text)
+        assert error is not None
+        assert len(error) <= 305  # 300 + "…"
+
+    def test_returns_first_line_of_multiline_error(self):
+        """Should return only the first line as error summary."""
+        text = "Aristotle encountered an error\nLine 2 details\nLine 3 details"
+        error = _detect_api_error(text)
+        assert error is not None
+        assert "Line 2" not in error
+
+    def test_error_in_formal_mode_posts_failure(self, slack_event, say, client):
+        """When Aristotle returns an error file, the bot should report failure."""
+        classified = ClassifiedMessage(
+            kind=MessageKind.LEAN_URL,
+            payload="https://example.com/Foo.lean",
+        )
+
+        error_output = "Aristotle encountered an error processing this file."
+        mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/Foo.lean"))
+        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        with (
+            patch("aristotlebot.handlers.download_url", mock_download),
+            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.read_solution_file", return_value=error_output),
+            patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
+            patch("aristotlebot.handlers.shutil.rmtree"),
+            patch("aristotlebot.handlers.upload_slack_file"),
+            patch("aristotlebot.handlers.resolve_imports", AsyncMock(side_effect=RuntimeError("no repo"))),
+            patch("aristotlebot.handlers.extract_github_repo_info", return_value=None),
+            patch.object(Path, "read_text", return_value="-- no imports"),
+        ):
+            import asyncio
+            asyncio.run(handle_message(slack_event, say, client, classified))
+
+        # Should have posted an error message, not a success
+        all_texts = [
+            c.kwargs.get("text", c[1].get("text", ""))
+            for c in say.call_args_list
+        ]
+        error_msgs = [t for t in all_texts if ":x:" in t]
+        success_msgs = [t for t in all_texts if ":white_check_mark:" in t]
+        assert len(error_msgs) >= 1, "Should post error when API returns error file"
+        assert len(success_msgs) == 0, "Should NOT post success when API returns error file"
 
 
 class TestIntegrationStructure:
