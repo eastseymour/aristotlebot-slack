@@ -152,6 +152,22 @@ class TestParseLeanImports:
             assert len(imports) == 1, f"Failed for {pkg}"
             assert imports[0].kind == ImportKind.EXTERNAL, f"{pkg} not classified as external"
 
+    def test_vcvio_classified_as_external(self):
+        """VCVio (a Lake dependency) should be classified as external."""
+        source = "import VCVio.OracleComp.QueryTracking.CachingOracle"
+        imports = parse_lean_imports(source)
+        assert len(imports) == 1
+        assert imports[0].kind == ImportKind.EXTERNAL
+        assert imports[0].top_level_package == "VCVio"
+
+    def test_comppoly_classified_as_external(self):
+        """CompPoly (a Lake dependency) should be classified as external."""
+        source = "import CompPoly.Data.Classes.DCast"
+        imports = parse_lean_imports(source)
+        assert len(imports) == 1
+        assert imports[0].kind == ImportKind.EXTERNAL
+        assert imports[0].top_level_package == "CompPoly"
+
     def test_real_world_lean_file(self):
         """Test parsing a realistic Lean 4 file header."""
         source = """
@@ -270,6 +286,62 @@ class TestExtractGitHubRepoInfo:
         assert info.owner == "my-org"
         assert info.repo == "my-repo"
         assert info.ref == "dev"
+
+    def test_refs_heads_branch(self):
+        """URLs with refs/heads/BRANCH should parse correctly."""
+        url = (
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "refs/heads/main/ArkLib/Data/Polynomial/RationalFunctions.lean"
+        )
+        info = extract_github_repo_info(url)
+        assert info is not None
+        assert info.owner == "Verified-zkEVM"
+        assert info.repo == "ArkLib"
+        assert info.ref == "refs/heads/main"
+
+    def test_refs_tags_version(self):
+        """URLs with refs/tags/TAG should parse correctly."""
+        url = (
+            "https://raw.githubusercontent.com/owner/repo/"
+            "refs/tags/v1.0.0/src/File.lean"
+        )
+        info = extract_github_repo_info(url)
+        assert info is not None
+        assert info.ref == "refs/tags/v1.0.0"
+
+    def test_refs_heads_raw_url_for(self):
+        """raw_url_for should reconstruct valid URLs with refs/heads/ refs."""
+        info = GitHubRepoInfo(
+            owner="Verified-zkEVM",
+            repo="ArkLib",
+            ref="refs/heads/main",
+        )
+        url = info.raw_url_for("ArkLib/Data/Fin/Basic.lean")
+        assert url == (
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "refs/heads/main/ArkLib/Data/Fin/Basic.lean"
+        )
+
+    def test_commit_hash_ref(self):
+        """Full commit hashes should parse correctly."""
+        url = (
+            "https://raw.githubusercontent.com/Verified-zkEVM/ArkLib/"
+            "27ff62470e9947f72ddd978db458ee622f8bdcd1/"
+            "ArkLib/ProofSystem/Component/CheckClaim.lean"
+        )
+        info = extract_github_repo_info(url)
+        assert info is not None
+        assert info.ref == "27ff62470e9947f72ddd978db458ee622f8bdcd1"
+
+    def test_blob_url_with_refs_heads(self):
+        """GitHub blob URLs with refs/heads/ should parse correctly."""
+        url = (
+            "https://github.com/owner/repo/blob/"
+            "refs/heads/develop/src/File.lean"
+        )
+        info = extract_github_repo_info(url)
+        assert info is not None
+        assert info.ref == "refs/heads/develop"
 
 
 # ===================================================================
