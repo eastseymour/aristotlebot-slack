@@ -118,10 +118,12 @@ def _post_result(
             logger.exception("Failed to upload solution file; falling back to summary only")
             summary += "\n_(File upload failed; solution not attached.)_"
 
-        # Generate Lean 4 playground link for interactive verification
+        # Generate Lean 4 playground link for interactive verification.
+        # Uses Slack mrkdwn link format <URL|label> so the long encoded URL
+        # is hidden behind a clean clickable hyperlink (ARI-13).
         playground_url = lean_playground_url(result.solution_text)
         if playground_url:
-            summary += f"\n:link: <{playground_url}|Open in Lean 4 Playground>"
+            summary += f"\n<{playground_url}|\U0001f517 Open in Lean Playground>"
 
     say(text=summary, thread_ts=thread_ts)
 
