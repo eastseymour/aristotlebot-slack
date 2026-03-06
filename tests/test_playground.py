@@ -190,11 +190,18 @@ class TestPlaygroundSlackIntegration:
     """Tests verifying playground URL works in Slack message context."""
 
     def test_url_is_valid_for_slack_link(self):
-        """URLs should work as Slack link targets."""
+        """URLs should work as Slack mrkdwn link targets.
+
+        The link format <URL|🔗 Open in Lean Playground> hides the long
+        encoded URL behind a clean clickable hyperlink in Slack (ARI-13).
+        """
         code = "theorem foo : True := trivial"
         url = lean_playground_url(code)
         assert url is not None
-        # Slack link format: <URL|label>
-        slack_link = f"<{url}|Open in Lean 4 Playground>"
+        # Slack mrkdwn link format: <URL|label>
+        slack_link = f"<{url}|\U0001f517 Open in Lean Playground>"
         assert "live.lean-lang.org" in slack_link
         assert "#codez=" in slack_link
+        # Verify the URL is properly enclosed
+        assert slack_link.startswith("<https://")
+        assert slack_link.endswith(">")

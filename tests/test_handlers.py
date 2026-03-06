@@ -737,7 +737,7 @@ class TestPlaygroundLinkInResults:
     """Tests verifying playground links are included in successful results."""
 
     def test_success_result_includes_playground_link(self, say, client):
-        """Successful proof should include a Lean 4 playground link."""
+        """Successful proof should include a Lean Playground link."""
         result = AristotleResult(
             status="COMPLETE",
             solution_text="theorem foo : True := trivial",
@@ -754,7 +754,7 @@ class TestPlaygroundLinkInResults:
         say.assert_called_once()
         text = say.call_args.kwargs["text"]
         assert "live.lean-lang.org" in text
-        assert "Lean 4 Playground" in text
+        assert "Open in Lean Playground" in text
         assert "#codez=" in text
 
     def test_error_result_does_not_include_playground_link(self, say, client):
@@ -794,7 +794,12 @@ class TestPlaygroundLinkInResults:
         assert "live.lean-lang.org" not in text
 
     def test_playground_link_is_slack_formatted(self, say, client):
-        """Playground link should use Slack link format: <URL|label>."""
+        """Playground link should use Slack mrkdwn link format: <URL|label>.
+
+        The link emoji (🔗) must be INSIDE the <URL|label> so the entire
+        element renders as a single clean clickable hyperlink in Slack,
+        hiding the long encoded playground URL (ARI-13).
+        """
         result = AristotleResult(
             status="COMPLETE",
             solution_text="theorem bar : 1 + 1 = 2 := rfl",
@@ -809,9 +814,39 @@ class TestPlaygroundLinkInResults:
             )
 
         text = say.call_args.kwargs["text"]
-        # Slack link format check
+        # Slack mrkdwn link format: <URL|🔗 Open in Lean Playground>
         assert "<https://live.lean-lang.org/#codez=" in text
-        assert "|Open in Lean 4 Playground>" in text
+        assert "|\U0001f517 Open in Lean Playground>" in text
+        # The raw URL should NOT appear outside the <> brackets
+        assert "Open in Lean Playground: https://" not in text
+
+    def test_playground_link_no_raw_url_visible(self, say, client):
+        """Verify the raw playground URL is never displayed outside <> brackets.
+
+        Postcondition: The long encoded URL is always wrapped in Slack's
+        <URL|label> syntax so users see only the clean label text.
+        """
+        result = AristotleResult(
+            status="COMPLETE",
+            solution_text="theorem baz : True := trivial",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file"):
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        text = say.call_args.kwargs["text"]
+        # Every occurrence of the playground base URL must be inside <...>
+        import re
+        playground_mentions = re.findall(r"live\.lean-lang\.org", text)
+        assert len(playground_mentions) >= 1, "Playground link should be present"
+        # All playground URLs must be inside <URL|label> brackets
+        naked_urls = re.findall(r"(?<![<])https://live\.lean-lang\.org", text)
+        assert len(naked_urls) == 0, "Playground URL must be inside <URL|label> Slack link"
 
 
 class TestIntegrationStructure:
