@@ -509,7 +509,11 @@ class TestImportResolutionInUrlHandler:
 
     @pytest.mark.asyncio
     async def test_url_handler_resolves_imports(self, slack_event, say, client):
-        """URL handler should resolve imports and pass context to Aristotle."""
+        """URL handler should resolve imports and pass context to Aristotle.
+
+        When context files are present, the handler uses the lower-level
+        Project API (create + add_context + solve) instead of prove_from_file.
+        """
         classified = ClassifiedMessage(
             kind=MessageKind.LEAN_URL,
             payload="https://raw.githubusercontent.com/org/ArkLib/main/ArkLib/File.lean",
@@ -519,7 +523,6 @@ class TestImportResolutionInUrlHandler:
         dep_content = "def core := 1"
 
         mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/File.lean"))
-        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
 
         resolved = ResolvedImports(
             resolved_files={"ArkLib/Core.lean": dep_content},
@@ -527,9 +530,14 @@ class TestImportResolutionInUrlHandler:
             depth_reached=1,
         )
 
+        # Mock the lower-level Project API used when context files are present
+        mock_project = AsyncMock()
+        mock_project.wait_for_completion = AsyncMock(return_value="/tmp/solution.lean")
+        mock_create = AsyncMock(return_value=mock_project)
+
         with (
             patch("aristotlebot.handlers.download_url", mock_download),
-            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.Project.create", mock_create),
             patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
@@ -539,15 +547,18 @@ class TestImportResolutionInUrlHandler:
             patch.object(Path, "read_text", return_value=lean_source),
             patch("aristotlebot.handlers._write_context_files", return_value=[
                 Path("/tmp/aristotlebot_test/ArkLib/Core.lean"),
-            ]) as mock_write_ctx,
+            ]),
         ):
             await handle_message(slack_event, say, client, classified)
 
-        # Aristotle should receive context_file_paths
-        mock_prove.assert_called_once()
-        call_kwargs = mock_prove.call_args.kwargs
-        assert "context_file_paths" in call_kwargs
-        assert len(call_kwargs["context_file_paths"]) == 1
+        # Project.create should have been called (lower-level API for context)
+        mock_create.assert_called_once()
+        # add_context should have been called with the context files
+        mock_project.add_context.assert_called_once()
+        ctx_kwargs = mock_project.add_context.call_args.kwargs
+        assert ctx_kwargs["project_root"] == Path("/tmp/aristotlebot_test")
+        # solve should have been called
+        mock_project.solve.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_url_handler_reports_import_status(self, slack_event, say, client):
@@ -565,11 +576,15 @@ class TestImportResolutionInUrlHandler:
         )
 
         mock_download = AsyncMock(return_value=Path("/tmp/aristotlebot_test/File.lean"))
-        mock_prove = AsyncMock(return_value="/tmp/solution.lean")
+
+        # Mock the lower-level Project API (used when context files present)
+        mock_project = AsyncMock()
+        mock_project.wait_for_completion = AsyncMock(return_value="/tmp/solution.lean")
+        mock_create = AsyncMock(return_value=mock_project)
 
         with (
             patch("aristotlebot.handlers.download_url", mock_download),
-            patch("aristotlebot.handlers.Project.prove_from_file", mock_prove),
+            patch("aristotlebot.handlers.Project.create", mock_create),
             patch("aristotlebot.handlers.read_solution_file", return_value="-- solved"),
             patch("aristotlebot.handlers.make_temp_dir", return_value=Path("/tmp/aristotlebot_test")),
             patch("aristotlebot.handlers.shutil.rmtree"),
@@ -713,6 +728,91 @@ class TestResolveImportsSafe:
 # ===================================================================
 # Integration test structure
 # ===================================================================
+
+# ===================================================================
+# Playground link in results
+# ===================================================================
+
+class TestPlaygroundLinkInResults:
+    """Tests verifying playground links are included in successful results."""
+
+    def test_success_result_includes_playground_link(self, say, client):
+        """Successful proof should include a Lean 4 playground link."""
+        result = AristotleResult(
+            status="COMPLETE",
+            solution_text="theorem foo : True := trivial",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file"):
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "live.lean-lang.org" in text
+        assert "Lean 4 Playground" in text
+        assert "#codez=" in text
+
+    def test_error_result_does_not_include_playground_link(self, say, client):
+        """Error results should NOT include a playground link."""
+        result = AristotleResult(
+            status="FAILED",
+            error="API timeout",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file") as mock_upload:
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "live.lean-lang.org" not in text
+        mock_upload.assert_not_called()
+
+    def test_no_solution_does_not_include_playground_link(self, say, client):
+        """Complete without solution should NOT include a playground link."""
+        result = AristotleResult(status="COMPLETE", solution_text=None)
+
+        with patch("aristotlebot.handlers.upload_slack_file") as mock_upload:
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        say.assert_called_once()
+        text = say.call_args.kwargs["text"]
+        assert "live.lean-lang.org" not in text
+
+    def test_playground_link_is_slack_formatted(self, say, client):
+        """Playground link should use Slack link format: <URL|label>."""
+        result = AristotleResult(
+            status="COMPLETE",
+            solution_text="theorem bar : 1 + 1 = 2 := rfl",
+        )
+
+        with patch("aristotlebot.handlers.upload_slack_file"):
+            _post_result(
+                say, client,
+                channel="C12345",
+                thread_ts="1234567890.123456",
+                result=result,
+            )
+
+        text = say.call_args.kwargs["text"]
+        # Slack link format check
+        assert "<https://live.lean-lang.org/#codez=" in text
+        assert "|Open in Lean 4 Playground>" in text
+
 
 class TestIntegrationStructure:
     """Placeholder integration tests — require live Slack and Aristotle credentials.

@@ -45,6 +45,8 @@ MAX_FILES: int = 50
 
 #: Known external Lean 4 packages that we cannot resolve from the source repo.
 #: These are reported as unresolved rather than attempted.
+#: Includes standard Lean/Mathlib packages and common Lake dependencies
+#: that live in separate repositories (e.g. VCVio, CompPoly).
 EXTERNAL_PACKAGES: frozenset[str] = frozenset({
     "Mathlib",
     "Std",
@@ -56,6 +58,11 @@ EXTERNAL_PACKAGES: frozenset[str] = frozenset({
     "Aesop",
     "ProofWidgets",
     "Cli",
+    "VCVio",
+    "CompPoly",
+    "ImportGraph",
+    "LeanSearchClient",
+    "Plausible",
 })
 
 
