@@ -300,29 +300,64 @@ async def _run_aristotle_formal(
 ) -> AristotleResult:
     """Submit a .lean file to Aristotle (formal mode) and return the result.
 
+    When context_file_paths are provided, uses the lower-level Project API
+    to explicitly set project_root=tmp_dir, ensuring that relative file paths
+    sent to the API match the Lean import paths (e.g. ``ArkLib/Data/Fin/Basic.lean``
+    rather than just ``Basic.lean``).
+
     Args:
         input_path: Path to the main .lean file.
-        tmp_dir: Temporary directory for output.
+        tmp_dir: Temporary directory for output.  Also used as the project root
+            when context files are provided.
         context_file_paths: Optional list of resolved dependency files to
-            include as context for the LLM (ARI-6).
+            include as context (ARI-6).  These must be laid out in *tmp_dir*
+            with their repo-relative paths preserved.
 
     Postconditions:
         - Always returns an AristotleResult (never raises to the caller).
+
+    Invariant:
+        - When context files are provided, project_root is always tmp_dir so
+          that ``file.relative_to(project_root)`` yields the correct import path.
     """
     output_path = tmp_dir / "solution.lean"
     try:
-        kwargs: dict = dict(
-            input_file_path=input_path,
-            validate_lean_project=False,
-            auto_add_imports=False,
-            wait_for_completion=True,
-            output_file_path=output_path,
-            project_input_type=ProjectInputType.FORMAL_LEAN,
-        )
         if context_file_paths:
-            kwargs["context_file_paths"] = context_file_paths
+            # Use lower-level API for precise project_root control.
+            # The high-level prove_from_file() auto-computes project_root
+            # as the common parent of context files, which gives wrong
+            # relative paths when all context files share a deep prefix.
+            project = await Project.create(
+                project_input_type=ProjectInputType.FORMAL_LEAN,
+                validate_lean_project_root=False,
+            )
 
-        result_path_str = await Project.prove_from_file(**kwargs)
+            await project.add_context(
+                context_file_paths=context_file_paths,
+                validate_lean_project_root=False,
+                project_root=tmp_dir,
+            )
+            logger.info(
+                "Added %d context files with project_root=%s",
+                len(context_file_paths), tmp_dir,
+            )
+
+            await project.solve(input_file_path=input_path)
+
+            result_path_str = await project.wait_for_completion(
+                output_file_path=output_path,
+            )
+        else:
+            # No context files — use the simpler high-level API.
+            result_path_str = await Project.prove_from_file(
+                input_file_path=input_path,
+                validate_lean_project=False,
+                auto_add_imports=False,
+                wait_for_completion=True,
+                output_file_path=output_path,
+                project_input_type=ProjectInputType.FORMAL_LEAN,
+            )
+
         result_path = Path(result_path_str)
         solution_text = read_solution_file(result_path)
         return AristotleResult(status="COMPLETE", solution_text=solution_text)
