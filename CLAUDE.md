@@ -44,11 +44,13 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
    - Downloads/prepares input
    - Resolves Lean 4 imports and fetches dependency files (ARI-6, for URL and file upload handlers)
    - When context files are present, uses the lower-level `Project.create()` + `add_context()` + `solve()` API with explicit `project_root=tmp_dir` to ensure correct relative paths.  Without context, uses the simpler `prove_from_file()` API.
+   - Detects Aristotle API errors in output files via `_detect_api_error()` (ARI-14) — if the output contains sentinel phrases like "Aristotle encountered an error", it's treated as FAILED instead of silently returned as a solution
    - Posts a brief summary in-thread (✅/❌ + theorem name + one-line description)
    - Uploads the solution as a `.lean` file attachment (via `upload_slack_file()`)
    - Generates a Lean 4 playground link (via `lean_playground_url()`) for interactive verification, formatted as a Slack mrkdwn hyperlink `<URL|🔗 Open in Lean Playground>` to hide the long encoded URL (ARI-13)
    - Cleans up temp files in `finally` blocks
    - `_post_result()` — Central helper that posts both the summary, file attachment, and playground link. Falls back gracefully if file upload fails.
+   - `_detect_api_error()` — Sentinel-based detection of Aristotle errors in output files (ARI-14). Checks for phrases like "Aristotle encountered an error", "Internal server error", etc. Returns the first line of the error or None.
    - `_resolve_imports_safe()` — Error-handling wrapper for import resolution. Never raises; returns empty `ResolvedImports` on failure.
    - `_write_context_files()` — Writes resolved dependency files to disk for aristotlelib.
    - `_report_import_status()` — Posts import resolution status (resolved count, external deps, warnings) to the Slack thread.
@@ -66,14 +68,16 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
    - `_make_solution_filename()` — Generates descriptive `.lean` filenames from solution text.
    - `read_solution_file()` — Reads `.lean` or `.tar.gz` solution files
 
-4. **lean_imports.py** — Lean 4 import parsing and recursive dependency resolution (ARI-6):
+4. **lean_imports.py** — Lean 4 import parsing and recursive dependency resolution (ARI-6, ARI-14):
    - `parse_lean_imports()` — Regex-based parser that extracts `import` statements from Lean 4 source, classifying each as LOCAL or EXTERNAL via the `ImportKind` enum.
    - `import_to_file_path()` — Converts dotted module paths to POSIX file paths (e.g. `ArkLib.Data.Fin.Basic` → `ArkLib/Data/Fin/Basic.lean`).
    - `extract_github_repo_info()` — Extracts owner, repo, and ref from GitHub raw/blob URLs. Handles `refs/heads/BRANCH` and `refs/tags/TAG` URL patterns. Returns `GitHubRepoInfo` or `None`.
-   - `resolve_imports()` — Recursively resolves local imports by fetching files from GitHub. Bounded by `MAX_DEPTH=10` and `MAX_FILES=50`. External packages (Mathlib, Std, Init, VCVio, CompPoly, etc.) are classified via `EXTERNAL_PACKAGES` frozenset and reported as unresolved.
+   - `resolve_imports()` — Recursively resolves same-repo imports by fetching files from GitHub. Uses an **allowlist approach** (ARI-14): only imports whose top-level module matches `repo_info.repo` are fetched. All other imports are external by definition. Bounded by `MAX_DEPTH=10` and `MAX_FILES=50`.
+   - `_resolve_recursive()` — Internal recursive resolver. Takes a `project_name` parameter (derived from `repo_info.repo`) and only fetches imports where `imp.top_level_package == project_name`. This prevents 404 errors from trying to fetch Mathlib/Std/VCVio/etc. from the source repo.
    - `format_import_context()` — Formats resolved files into a context string for the LLM.
    - Key types: `LeanImport` (frozen dataclass), `GitHubRepoInfo` (frozen dataclass), `ResolvedImports` (discriminated result with resolved files and unresolved imports), `UnresolvedImport`.
-   - Invariants: recursive resolution always terminates (bounded depth + file count); cycle detection via visited set; external deps never fetched; all network errors caught and degraded gracefully.
+   - Invariants: recursive resolution always terminates (bounded depth + file count); cycle detection via visited set; only same-repo imports fetched (allowlist, ARI-14); all network errors caught and degraded gracefully.
+   - `EXTERNAL_PACKAGES` frozenset is kept for `parse_lean_imports()` classification but is **not** used by the resolver — the resolver uses the repo name as the authoritative filter.
 
 6. **playground.py** — Lean 4 playground link generation:
    - `lean_playground_url()` — Generates a `live.lean-lang.org` URL from Lean source code using LZ-String base64 compression (`codez=` URL fragment parameter). Returns `None` for empty/whitespace input.
@@ -97,7 +101,9 @@ Slack event → app.py (classify + telemetry) → handlers.py (dispatch) → ari
 - **MessageKind enum**: Discriminated union prevents invalid classification states.
 - **GitHub blob URL normalization**: `download_url()` calls `_github_blob_to_raw()` to convert GitHub blob view URLs (`github.com/{owner}/{repo}/blob/{ref}/{path}`) to raw content URLs (`raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}`). Without this, the bot downloads the HTML page instead of the actual `.lean` file, causing Aristotle to fail. The conversion is transparent to callers.
 - **Slack angle-bracket stripping**: Slack wraps URLs in `<>` in event text (e.g. `<https://example.com/file.lean>`). The `_strip_slack_angle_brackets()` helper normalizes these before URL matching. This is done as a preprocessing step rather than complicating the URL regex, keeping concerns separated.
-- **Import resolution (ARI-6)**: When a `.lean` file is submitted (via URL or upload), the bot parses its `import` statements, fetches dependency files from the same GitHub repo, and passes them as `context_file_paths` to aristotlelib. This gives the LLM visibility into types, theorems, and definitions from imported files. External packages (Mathlib, Std, VCVio, CompPoly, etc.) are never fetched — they are reported as unresolved. Import resolution is best-effort: failures degrade gracefully (the file is still submitted without context).
+- **Import resolution (ARI-6, ARI-14)**: When a `.lean` file is submitted (via URL or upload), the bot parses its `import` statements, fetches dependency files from the same GitHub repo, and passes them as `context_file_paths` to aristotlelib. This gives the LLM visibility into types, theorems, and definitions from imported files. Import resolution is best-effort: failures degrade gracefully (the file is still submitted without context).
+- **Allowlist import filtering (ARI-14)**: The resolver uses an allowlist approach: only imports whose top-level module matches the repo name (`repo_info.repo`) are fetched. For example, when processing a file from `Verified-zkEVM/ArkLib`, only `ArkLib.*` imports are fetched; `Mathlib.*`, `Std.*`, `VCVio.*`, `CompPoly.*` etc. are all treated as external. This replaced the previous blocklist approach (static `EXTERNAL_PACKAGES` frozenset) which would miss unknown external packages and trigger 404 errors. The `EXTERNAL_PACKAGES` frozenset is retained for `parse_lean_imports()` classification only, not for resolution decisions.
+- **API error detection (ARI-14)**: When Aristotle returns an error in the output file (e.g. "Aristotle encountered an error processing this file"), the bot now detects this via sentinel string matching (`_detect_api_error()`) and reports it as a failure with `:x:` emoji, rather than silently presenting the error text as a "solution". This applies to both formal and informal mode handlers.
 - **Playground link generation (ARI-13)**: For successful proofs, the bot generates a `live.lean-lang.org` playground URL so users can interactively verify the code in their browser. The encoding uses LZ-String base64 compression (reverse-engineered from the lean4web source). The link is formatted using Slack mrkdwn syntax `<URL|🔗 Open in Lean Playground>` so the long encoded URL is hidden behind a clean clickable hyperlink. Invariant: the raw URL is never displayed outside `<>` brackets.
 - **Temp dir cleanup**: Always in `finally` blocks. Never leak temp files.
 - **Dynamic bot_id discovery**: At startup, `create_app()` calls `auth.test` to discover the bot's own `bot_id`. This is stored in `_own_bot_id` and used to filter ONLY the bot's own messages. Messages from other bots/apps (like Klaw) are processed normally. The bot_id is never hardcoded.
