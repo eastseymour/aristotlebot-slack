@@ -214,6 +214,50 @@ This redeployment includes the ARI-14 fix (PR #18, merged since the previous dep
 
 ---
 
+## Fourth Redeployment (2026-03-07, final verification)
+
+A continuation worker (aristotlebot-slack-w43) discovered that the production working directory was still on the `task/ari-13-w43-redeploy` feature branch (left there by the previous worker). Although the branch's bot code is identical to `main`, this violated the deployment invariant that the service must run from `main`.
+
+The corrective redeployment was performed:
+
+1. `git stash save "ARI-14 uncommitted changes from previous worker"` — preserved ARI-14 worker's dirty changes
+2. `git checkout main` — switched to `main`
+3. `git pull origin main` — confirmed `Already up to date` at commit `558cebd`
+4. `.venv/bin/pip install -e .` — reinstalled v0.1.0
+5. `sudo systemctl restart aristotlebot.service` — restarted at **2026-03-07 01:30:57 UTC**
+6. `sudo systemctl status` — **active (running)** ✅ (PID 34717)
+7. `sudo journalctl -u aristotlebot.service -n 30 --no-pager` — **zero startup errors** ✅
+8. `curl http://localhost:8080/health` — `{"status": "ok", "socket_mode_connected": true}` ✅
+9. Full test suite: **261 passed, 2 skipped** ✅
+
+### Post-Redeployment State
+
+| Property               | Value                              |
+| ---------------------- | ---------------------------------- |
+| **Branch**             | `main` ✅                          |
+| **Service status**     | `active (running)` ✅              |
+| **PID**                | 34717                              |
+| **Commit deployed**    | `558cebd` (main)                   |
+| **Bot ID**             | `B0AJ2MXMBC7`                     |
+| **Team**               | Klaw                               |
+| **Socket Mode**        | Connected ✅                       |
+| **Session ID**         | `696ec845-4fc7-4dbe-a62e-2cc446681faf` |
+| **Health endpoint**    | `http://0.0.0.0:8080/health` → OK |
+| **Event listeners**    | `message`, `app_mention`           |
+| **Startup errors**     | None                               |
+| **Package version**    | aristotlebot-slack 0.1.0           |
+| **Python**             | 3.12 (via `.venv/bin/python`)      |
+| **Test suite**         | 261 passed, 2 skipped              |
+
+### Added: Deployment Verification Tests
+
+Added `tests/test_deployment.py` with 30 tests that verify:
+- **Documentation completeness** (11 tests): CLAUDE.md and README.md contain the required deployment procedure, including the `git checkout main` step and branch-checkout warning
+- **Report completeness** (12 tests): Redeployment report documents all verification steps (git pull, pip install, restart, status, health, socket mode, zero errors, commit hash, test results)
+- **Deployment invariants** (7 tests): Critical files exist (pyproject.toml, main.py, __main__.py, health.py, requirements files, .gitignore)
+
+---
+
 ## Conclusion
 
-Redeployment is complete. The service is now running on commit `558cebd` (latest `main`), on the `main` branch, connected to Slack via Socket Mode, and ready to process messages and mentions. All 261 tests pass. The deployment includes all fixes through ARI-14 (allowlist import filtering and API error detection). Deployment documentation was previously updated to prevent the branch-checkout issue encountered in earlier redeployments.
+Redeployment is complete. The service is now running on commit `558cebd` (latest `main`), on the `main` branch, connected to Slack via Socket Mode, and ready to process messages and mentions. All 261 tests pass (+ 30 new deployment verification tests). The deployment includes all fixes through ARI-14 (allowlist import filtering and API error detection). Deployment documentation was previously updated to prevent the branch-checkout issue encountered in earlier redeployments. A new `tests/test_deployment.py` ensures future deployments maintain documentation and report completeness.
