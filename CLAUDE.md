@@ -259,13 +259,16 @@ journalctl -u aristotlebot.service -f    # Follow logs
 curl http://localhost:8080/health        # Health check
 ```
 
-### Deployment Process
+### Deployment / Redeployment Process
 
 There is no CI/CD pipeline. To deploy code changes:
 1. SSH into `klaw-controller` (or run from the VM)
-2. `cd /var/lib/openclaw/agents/aristotlebot-slack`
-3. `git pull origin main`
-4. `systemctl restart aristotlebot.service`
+2. `cd /var/lib/openclaw/agents/aristotlebot-slack && git pull origin main`
+3. `.venv/bin/pip install -e .` (in case of any dependency changes)
+4. `sudo systemctl restart aristotlebot.service`
+5. `sudo systemctl status aristotlebot.service` — confirm `active (running)`
+6. `sudo journalctl -u aristotlebot.service -n 30 --no-pager` — confirm no startup errors
+7. `curl http://localhost:8080/health` — confirm `"status": "ok"` and `"socket_mode_connected": true`
 
 ### Service Configuration
 
