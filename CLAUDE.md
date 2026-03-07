@@ -274,3 +274,37 @@ The systemd unit file is at `/etc/systemd/system/aristotlebot.service`:
 - **Enabled on boot**: Yes
 - **Environment**: Loaded from `/etc/klaw/aristotlebot.env`
 - **Runs as**: root (recommendation: switch to dedicated user)
+
+## Klaw Worker Architecture (ARI-14)
+
+This bot is deployed and managed by Klaw, which uses a worker-based architecture.
+Understanding the worker lifecycle is important when diagnosing deployment issues.
+
+### Worker Status Progression
+
+```
+Linear: Todo -> In Progress -> In Review -> Done
+                  ^worker       ^verification    ^verified
+                   runs          worker runs      & merged
+```
+
+### Key Concepts
+
+- **Workers**: Isolated Claude agent sessions that perform tasks (code changes, verification, etc.)
+- **Verification workers**: After a regular worker creates a PR and sets the Linear issue to "In Review", a verification worker is spawned to review the code, run tests, and merge the PR
+- **Deduplication**: Klaw tracks which Linear issues have active workers via `_linear_issues_with_workers` set and `_get_running_issue_keys()` to prevent duplicate workers
+- **Failure tracking**: `_failed_verification_attempts` dict caps verification retries at `MAX_VERIFICATION_ATTEMPTS` (default: 2) to prevent runaway respawn loops (see ARI-14 investigation report)
+
+### Runaway Worker Loop (ARI-14 Bug)
+
+Workers w43-w75 kept respawning for the same verification task because failed verification workers unconditionally cleared the tracking set, allowing the periodic scan to respawn them every 10 minutes. The fix: use a separate failure counter (`_failed_verification_attempts`) as the primary guard, and always clear the tracking set to allow controlled retries. See `reports/ari-14-runaway-worker-loop-investigation.md` for the full root cause analysis.
+
+### Periodic Loops (Klaw Controller)
+
+| Loop | Interval | Purpose |
+|------|----------|---------|
+| `_message_poll_loop` | 30s | Slack messages |
+| `_worker_monitor_loop` | 60s | Worker health + completion |
+| `_linear_task_check_loop` | 600s | New work + verification + stale recovery |
+| `_budget_poll_loop` | configurable | Budget enforcement |
+| `_log_sync_loop` | 300s | Log synchronization |
