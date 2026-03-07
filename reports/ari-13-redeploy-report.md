@@ -140,6 +140,40 @@ git stash pop
 
 ---
 
+## Second Redeployment (2026-03-07)
+
+The initial redeployment (above) was performed from a working directory on the `fix/ari-14-import-crawling-allowlist` branch — **not** `main`. Although `git pull origin main` was run, it merged main into the feature branch rather than switching to main. The service was therefore running ARI-14 code (commit `cb75f57`) instead of main (`248499a`).
+
+A corrective redeployment was performed:
+
+1. `git checkout main` — switched working directory to main
+2. `git pull origin main` — confirmed `Already up to date` at commit `248499a`
+3. `.venv/bin/pip install -e .` — reinstalled v0.1.0
+4. `sudo systemctl restart aristotlebot.service` — restarted at **2026-03-07 00:04:32 UTC**
+5. `sudo systemctl status` — **active (running)** ✅ (PID 19942)
+6. `sudo journalctl -n 30` — **zero startup errors** ✅
+7. `curl http://localhost:8080/health` — `{"status": "ok", "socket_mode_connected": true}` ✅
+8. Full test suite: **246 passed, 2 skipped** ✅
+
+### Post-Redeployment State
+
+| Property               | Value                              |
+| ---------------------- | ---------------------------------- |
+| **Branch**             | `main` ✅ (was `fix/ari-14-...`)   |
+| **Service status**     | `active (running)` ✅              |
+| **PID**                | 19942                              |
+| **Commit deployed**    | `248499a` (main)                   |
+| **Bot ID**             | `B0AJ2MXMBC7`                     |
+| **Socket Mode**        | Connected ✅                       |
+| **Startup errors**     | None                               |
+| **Test suite**         | 246 passed, 2 skipped              |
+
+### Documentation Fix
+
+Updated CLAUDE.md and README.md deployment procedures to include `git checkout main` before `git pull origin main`, with a warning that the systemd service runs from the working directory and will execute whichever branch is checked out.
+
+---
+
 ## Conclusion
 
-Redeployment was successful with zero errors. The service is running on commit `248499a` (latest `main`), connected to Slack via Socket Mode, and ready to process messages and mentions.
+Redeployment was successful after correcting the branch checkout. The service is now running on commit `248499a` (latest `main`), on the `main` branch, connected to Slack via Socket Mode, and ready to process messages and mentions. Deployment documentation has been updated to prevent the branch-checkout issue in future redeployments.
