@@ -210,6 +210,20 @@ The bot is deployed as a **systemd service** on a GCP Compute Engine VM:
 
 See [`reports/ari-10-deployment-investigation.md`](reports/ari-10-deployment-investigation.md) for the full deployment investigation report and architecture diagram.
 
+### Redeployment Quick Steps
+
+```bash
+cd /var/lib/openclaw/agents/aristotlebot-slack
+git checkout main && git pull origin main              # MUST checkout main first!
+.venv/bin/pip install -e .                            # in case of dep changes
+sudo systemctl restart aristotlebot.service
+sudo systemctl status aristotlebot.service             # confirm active (running)
+sudo journalctl -u aristotlebot.service -n 30 --no-pager  # confirm no startup errors
+curl http://localhost:8080/health                      # confirm status: ok
+```
+
+> **Note**: The systemd service runs from the working directory. If checked out on a feature branch, it runs that branch's code — not main. Always verify with `git branch --show-current`.
+
 ## License
 
 Internal use.
