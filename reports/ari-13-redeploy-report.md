@@ -1,14 +1,14 @@
 # ARI-13: Redeployment Report
 
-**Date**: 2026-03-06
+**Date**: 2026-03-06 (initial), 2026-03-07 (latest redeployment)
 **Worker**: aristotlebot-slack-w43
-**Status**: ✅ Complete — service redeployed and verified
+**Status**: ✅ Complete — service redeployed and verified at commit `558cebd`
 
 ---
 
 ## Summary
 
-Successfully redeployed aristotlebot-slack on the `klaw-controller` VM. The service was confirmed up-to-date on `main` (commit `248499a`), dependencies were reinstalled, and the systemd service was restarted. All health checks pass with zero startup errors.
+Successfully redeployed aristotlebot-slack on the `klaw-controller` VM. The service is up-to-date on `main` (commit `558cebd`, including ARI-14 fixes), dependencies were reinstalled, and the systemd service was restarted. All health checks pass with zero startup errors. Full test suite: 261 passed, 2 skipped.
 
 ---
 
@@ -174,6 +174,46 @@ Updated CLAUDE.md and README.md deployment procedures to include `git checkout m
 
 ---
 
+## Third Redeployment (2026-03-07, commit 558cebd)
+
+Since the second redeployment, PR #18 (ARI-14: allowlist for import resolution and API error detection) was merged into main, advancing HEAD to `558cebd`. A continuation worker completed the full redeployment procedure:
+
+1. `git checkout main` — confirmed on `main` branch
+2. `git pull origin main` — confirmed `Already up to date` at commit `558cebd`
+3. `.venv/bin/pip install -e .` — reinstalled v0.1.0 (all dependencies already satisfied)
+4. `sudo systemctl restart aristotlebot.service` — restarted at **2026-03-07 01:16:10 UTC**
+5. `sudo systemctl status` — **active (running)** ✅ (PID 31801)
+6. `sudo journalctl -u aristotlebot.service -n 30 --no-pager` — **zero startup errors** ✅
+7. `curl http://localhost:8080/health` — `{"status": "ok", "socket_mode_connected": true}` ✅
+8. Full test suite: **261 passed, 2 skipped** ✅
+
+### Post-Redeployment State
+
+| Property               | Value                              |
+| ---------------------- | ---------------------------------- |
+| **Branch**             | `main` ✅                          |
+| **Service status**     | `active (running)` ✅              |
+| **PID**                | 31801                              |
+| **Commit deployed**    | `558cebd` (main)                   |
+| **Bot ID**             | `B0AJ2MXMBC7`                     |
+| **Team**               | Klaw                               |
+| **Socket Mode**        | Connected ✅                       |
+| **Session ID**         | `835d3a56-7820-4a61-ab01-6fcb3880ae2d` |
+| **Health endpoint**    | `http://0.0.0.0:8080/health` → OK |
+| **Event listeners**    | `message`, `app_mention`           |
+| **Startup errors**     | None                               |
+| **Package version**    | aristotlebot-slack 0.1.0           |
+| **Python**             | 3.12 (via `.venv/bin/python`)      |
+| **Test suite**         | 261 passed, 2 skipped              |
+
+### New Features Deployed
+
+This redeployment includes the ARI-14 fix (PR #18, merged since the previous deployment):
+- **Allowlist-based import filtering**: Only fetches imports whose top-level module matches the repo name, preventing 404 errors from unknown external packages
+- **API error detection**: `_detect_api_error()` sentinel-based detection of Aristotle errors in output files, reporting them as failures instead of silently returning error text as "solutions"
+
+---
+
 ## Conclusion
 
-Redeployment was successful after correcting the branch checkout. The service is now running on commit `248499a` (latest `main`), on the `main` branch, connected to Slack via Socket Mode, and ready to process messages and mentions. Deployment documentation has been updated to prevent the branch-checkout issue in future redeployments.
+Redeployment is complete. The service is now running on commit `558cebd` (latest `main`), on the `main` branch, connected to Slack via Socket Mode, and ready to process messages and mentions. All 261 tests pass. The deployment includes all fixes through ARI-14 (allowlist import filtering and API error detection). Deployment documentation was previously updated to prevent the branch-checkout issue encountered in earlier redeployments.
