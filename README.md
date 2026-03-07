@@ -210,6 +210,8 @@ The bot is deployed as a **systemd service** on a GCP Compute Engine VM:
 
 See [`reports/ari-10-deployment-investigation.md`](reports/ari-10-deployment-investigation.md) for the full deployment investigation report and architecture diagram.
 
+See [`reports/ari-14-runaway-worker-loop-investigation.md`](reports/ari-14-runaway-worker-loop-investigation.md) for the Klaw runaway verification worker loop root cause analysis (ARI-14).
+
 ## License
 
 Internal use.
