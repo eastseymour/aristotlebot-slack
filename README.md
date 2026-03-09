@@ -224,6 +224,8 @@ curl http://localhost:8080/health                      # confirm status: ok
 
 > **Note**: The systemd service runs from the working directory. If checked out on a feature branch, it runs that branch's code — not main. Always verify with `git branch --show-current`.
 
+See [`reports/ari-14-runaway-worker-loop-investigation.md`](reports/ari-14-runaway-worker-loop-investigation.md) for the Klaw runaway verification worker loop root cause analysis (ARI-14).
+
 ## License
 
 Internal use.
